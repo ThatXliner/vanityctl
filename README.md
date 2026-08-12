@@ -1,5 +1,7 @@
 # vanityctl
 
+[Website](https://bryanhu.com/vanityctl/) · [Documentation](#quick-start)
+
 `vanityctl` is a single-node declarative control plane for self-hosters and
 developers. It answers one question:
 
