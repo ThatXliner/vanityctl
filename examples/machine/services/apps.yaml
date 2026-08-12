@@ -1,0 +1,31 @@
+services:
+  billion:
+    type: docker
+    description: Git-backed web application
+    directory: ~/services/billion
+    build:
+      dockerfile: Dockerfile
+    ports: ["3000:3000"]
+    env_file: ~/secrets/billion.env
+    restart: unless-stopped
+    source:
+      type: git
+      repo: git@github.com:ThatXliner/billion.git
+      branch: main
+    deploy:
+      auto: true
+      trigger: { type: poll, interval: 60s }
+
+  minecraft:
+    type: docker
+    image: itzg/minecraft-server
+    ports: ["25565:25565"]
+    volumes: ["~/data/minecraft:/data"]
+    environment: { EULA: "TRUE" }
+    restart: always
+
+  local-llm:
+    type: process
+    directory: ~/services/llm
+    command: ./serve.sh
+    restart: always

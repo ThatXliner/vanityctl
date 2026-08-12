@@ -1,0 +1,657 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
+use anyhow::{Context, Result, bail};
+use async_trait::async_trait;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+
+use crate::{
+    config::{ConfigPaths, expand_path},
+    model::{RuntimeState, Service, ServiceStatus, ServiceType},
+    runner::SharedRunner,
+};
+
+#[async_trait]
+pub trait Backend: Send + Sync {
+    async fn status(&self, name: &str, service: &Service) -> Result<ServiceStatus>;
+    async fn apply(&self, name: &str, service: &Service) -> Result<bool>;
+    async fn start(&self, name: &str, service: &Service) -> Result<()>;
+    async fn stop(&self, name: &str, service: &Service) -> Result<()>;
+    async fn restart(&self, name: &str, service: &Service) -> Result<()>;
+    async fn logs(&self, name: &str, service: &Service, lines: usize) -> Result<String>;
+}
+
+pub struct BackendSet {
+    pub docker: DockerBackend,
+    pub compose: ComposeBackend,
+    pub launchd: LaunchdBackend,
+}
+
+impl BackendSet {
+    pub fn new(runner: SharedRunner, paths: ConfigPaths) -> Self {
+        Self {
+            docker: DockerBackend::new(runner.clone()),
+            compose: ComposeBackend::new(runner.clone()),
+            launchd: LaunchdBackend::new(runner, paths),
+        }
+    }
+
+    pub fn get(&self, kind: &ServiceType) -> &dyn Backend {
+        match kind {
+            ServiceType::Docker => &self.docker,
+            ServiceType::Compose => &self.compose,
+            ServiceType::Process | ServiceType::Job => &self.launchd,
+        }
+    }
+}
+
+fn base_status(name: &str, service: &Service, state: RuntimeState) -> ServiceStatus {
+    ServiceStatus {
+        name: name.into(),
+        kind: service.kind.clone(),
+        state,
+        health: None,
+        uptime_seconds: None,
+        cpu_percent: None,
+        memory_bytes: None,
+        pid: None,
+        ports: service.ports.clone(),
+        details: None,
+        deployment: None,
+        latest_job: None,
+    }
+}
+
+pub struct DockerBackend {
+    runner: SharedRunner,
+}
+impl DockerBackend {
+    pub fn new(runner: SharedRunner) -> Self {
+        Self { runner }
+    }
+}
+
+impl DockerBackend {
+    fn container(name: &str) -> String {
+        format!("vanityctl-{name}")
+    }
+    fn hash(service: &Service) -> Result<String> {
+        let bytes = serde_json::to_vec(service)?;
+        Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
+
+    fn build(&self, name: &str, service: &Service) -> Result<String> {
+        if let Some(build) = &service.build {
+            let tag = format!("vanityctl/{name}:managed");
+            let cwd = service
+                .directory
+                .as_deref()
+                .map(expand_path)
+                .transpose()?
+                .unwrap_or(std::env::current_dir()?);
+            let context = build.context.clone().unwrap_or_else(|| ".".into());
+            let mut args = vec![
+                "build".into(),
+                "-t".into(),
+                tag.clone(),
+                "-f".into(),
+                build.dockerfile.clone(),
+            ];
+            for (key, value) in &build.args {
+                args.extend(["--build-arg".into(), format!("{key}={value}")]);
+            }
+            args.push(context);
+            self.runner.run("docker", &args, Some(&cwd))?;
+            Ok(tag)
+        } else {
+            Ok(service.image.clone().context("docker image missing")?)
+        }
+    }
+
+    fn create(&self, name: &str, service: &Service, image: String) -> Result<()> {
+        let mut args = vec![
+            "run".into(),
+            "-d".into(),
+            "--name".into(),
+            Self::container(name),
+            "--label".into(),
+            "dev.vanityctl.managed=true".into(),
+            "--label".into(),
+            format!("dev.vanityctl.service={name}"),
+            "--label".into(),
+            format!("dev.vanityctl.config-hash={}", Self::hash(service)?),
+            "--restart".into(),
+            service.restart.docker_value().into(),
+        ];
+        for port in &service.ports {
+            args.extend(["-p".into(), port.clone()]);
+        }
+        for volume in &service.volumes {
+            args.extend(["-v".into(), expand_volume(volume)?]);
+        }
+        for (key, value) in &service.environment {
+            args.extend(["-e".into(), format!("{key}={value}")]);
+        }
+        if let Some(file) = &service.env_file {
+            args.extend([
+                "--env-file".into(),
+                expand_path(file)?.display().to_string(),
+            ]);
+        }
+        args.push(image);
+        if let Some(command) = &service.command {
+            args.push(command.clone());
+            args.extend(service.args.clone());
+        }
+        self.runner.run("docker", &args, None)?;
+        Ok(())
+    }
+}
+
+fn expand_volume(value: &str) -> Result<String> {
+    if let Some((left, right)) = value.split_once(':') {
+        Ok(format!("{}:{right}", expand_path(left)?.display()))
+    } else {
+        Ok(value.into())
+    }
+}
+
+#[async_trait]
+impl Backend for DockerBackend {
+    async fn status(&self, name: &str, service: &Service) -> Result<ServiceStatus> {
+        let args = vec![
+            "inspect".into(),
+            "--format".into(),
+            "{{json .State}}".into(),
+            Self::container(name),
+        ];
+        match self.runner.run("docker", &args, None) {
+            Ok(output) => {
+                let value: Value = serde_json::from_str(output.stdout.trim())
+                    .context("parse docker inspect state")?;
+                let running = value
+                    .get("Running")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let mut status = base_status(
+                    name,
+                    service,
+                    if running {
+                        RuntimeState::Running
+                    } else {
+                        RuntimeState::Stopped
+                    },
+                );
+                status.health = value
+                    .pointer("/Health/Status")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                status.details = value
+                    .get("Status")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                if running
+                    && let Ok(stats) = self.runner.run(
+                        "docker",
+                        &[
+                            "stats".into(),
+                            "--no-stream".into(),
+                            "--format".into(),
+                            "{{json .}}".into(),
+                            Self::container(name),
+                        ],
+                        None,
+                    )
+                    && let Ok(v) = serde_json::from_str::<Value>(stats.stdout.trim())
+                {
+                    status.cpu_percent = v
+                        .get("CPUPerc")
+                        .and_then(Value::as_str)
+                        .and_then(|x| x.trim_end_matches('%').parse().ok());
+                    status.memory_bytes = v
+                        .get("MemUsage")
+                        .and_then(Value::as_str)
+                        .and_then(|x| x.split('/').next())
+                        .and_then(parse_size);
+                }
+                Ok(status)
+            }
+            Err(_) => Ok(base_status(name, service, RuntimeState::Stopped)),
+        }
+    }
+
+    async fn apply(&self, name: &str, service: &Service) -> Result<bool> {
+        if !service.enabled {
+            self.stop(name, service).await.ok();
+            return Ok(false);
+        }
+        let container = Self::container(name);
+        let inspect = self.runner.run(
+            "docker",
+            &[
+                "inspect".into(),
+                "--format".into(),
+                "{{index .Config.Labels \"dev.vanityctl.config-hash\"}}".into(),
+                container.clone(),
+            ],
+            None,
+        );
+        let desired = Self::hash(service)?;
+        if let Ok(output) = inspect
+            && output.stdout.trim() == desired
+        {
+            self.runner
+                .run("docker", &["start".into(), container], None)?;
+            return Ok(false);
+        }
+        let image = self.build(name, service)?;
+        self.runner
+            .run("docker", &["rm".into(), "-f".into(), container], None)
+            .ok();
+        self.create(name, service, image)?;
+        Ok(true)
+    }
+    async fn start(&self, name: &str, _service: &Service) -> Result<()> {
+        self.runner
+            .run("docker", &["start".into(), Self::container(name)], None)?;
+        Ok(())
+    }
+    async fn stop(&self, name: &str, _service: &Service) -> Result<()> {
+        self.runner
+            .run("docker", &["stop".into(), Self::container(name)], None)?;
+        Ok(())
+    }
+    async fn restart(&self, name: &str, _service: &Service) -> Result<()> {
+        self.runner
+            .run("docker", &["restart".into(), Self::container(name)], None)?;
+        Ok(())
+    }
+    async fn logs(&self, name: &str, _service: &Service, lines: usize) -> Result<String> {
+        Ok(self
+            .runner
+            .run(
+                "docker",
+                &[
+                    "logs".into(),
+                    "--tail".into(),
+                    lines.to_string(),
+                    Self::container(name),
+                ],
+                None,
+            )?
+            .stdout)
+    }
+}
+
+pub struct ComposeBackend {
+    runner: SharedRunner,
+}
+impl ComposeBackend {
+    pub fn new(runner: SharedRunner) -> Self {
+        Self { runner }
+    }
+    fn base(service: &Service) -> Result<(Vec<String>, PathBuf)> {
+        let cwd = expand_path(
+            service
+                .directory
+                .as_deref()
+                .context("compose directory missing")?,
+        )?;
+        let mut args = vec!["compose".into()];
+        if let Some(file) = &service.file {
+            args.extend(["-f".into(), file.clone()]);
+        }
+        Ok((args, cwd))
+    }
+}
+
+#[async_trait]
+impl Backend for ComposeBackend {
+    async fn status(&self, name: &str, service: &Service) -> Result<ServiceStatus> {
+        let (mut args, cwd) = Self::base(service)?;
+        args.extend([
+            "ps".into(),
+            "--status".into(),
+            "running".into(),
+            "--quiet".into(),
+        ]);
+        match self.runner.run("docker", &args, Some(&cwd)) {
+            Ok(out) if !out.stdout.trim().is_empty() => {
+                Ok(base_status(name, service, RuntimeState::Running))
+            }
+            _ => Ok(base_status(name, service, RuntimeState::Stopped)),
+        }
+    }
+    async fn apply(&self, _name: &str, service: &Service) -> Result<bool> {
+        let (mut args, cwd) = Self::base(service)?;
+        args.extend(if service.enabled {
+            vec!["up".into(), "-d".into()]
+        } else {
+            vec!["stop".into()]
+        });
+        self.runner.run("docker", &args, Some(&cwd))?;
+        Ok(true)
+    }
+    async fn start(&self, _name: &str, service: &Service) -> Result<()> {
+        let (mut args, cwd) = Self::base(service)?;
+        args.push("start".into());
+        self.runner.run("docker", &args, Some(&cwd))?;
+        Ok(())
+    }
+    async fn stop(&self, _name: &str, service: &Service) -> Result<()> {
+        let (mut args, cwd) = Self::base(service)?;
+        args.push("stop".into());
+        self.runner.run("docker", &args, Some(&cwd))?;
+        Ok(())
+    }
+    async fn restart(&self, _name: &str, service: &Service) -> Result<()> {
+        let (mut args, cwd) = Self::base(service)?;
+        args.push("restart".into());
+        self.runner.run("docker", &args, Some(&cwd))?;
+        Ok(())
+    }
+    async fn logs(&self, _name: &str, service: &Service, lines: usize) -> Result<String> {
+        let (mut args, cwd) = Self::base(service)?;
+        args.extend(["logs".into(), "--tail".into(), lines.to_string()]);
+        Ok(self.runner.run("docker", &args, Some(&cwd))?.stdout)
+    }
+}
+
+pub struct LaunchdBackend {
+    runner: SharedRunner,
+    paths: ConfigPaths,
+    uid: u32,
+}
+impl LaunchdBackend {
+    pub fn new(runner: SharedRunner, paths: ConfigPaths) -> Self {
+        Self {
+            runner,
+            paths,
+            uid: unsafe { libc::getuid() },
+        }
+    }
+    fn label(name: &str) -> String {
+        format!("dev.vanityctl.{name}")
+    }
+    fn plist_path(&self, name: &str) -> PathBuf {
+        self.paths
+            .generated
+            .join("launchd")
+            .join(format!("{}.plist", Self::label(name)))
+    }
+    fn domain(&self) -> String {
+        format!("gui/{}", self.uid)
+    }
+}
+
+#[async_trait]
+impl Backend for LaunchdBackend {
+    async fn status(&self, name: &str, service: &Service) -> Result<ServiceStatus> {
+        if !service.enabled {
+            return Ok(base_status(name, service, RuntimeState::Disabled));
+        }
+        let target = format!("{}/{}", self.domain(), Self::label(name));
+        match self
+            .runner
+            .run("launchctl", &["print".into(), target], None)
+        {
+            Ok(output) => {
+                let mut status = base_status(
+                    name,
+                    service,
+                    if service.kind == ServiceType::Job {
+                        RuntimeState::Idle
+                    } else {
+                        RuntimeState::Running
+                    },
+                );
+                status.pid = parse_launchd_pid(&output.stdout);
+                if let Some(pid) = status.pid
+                    && let Ok(metrics) = self.runner.run(
+                        "ps",
+                        &[
+                            "-p".into(),
+                            pid.to_string(),
+                            "-o".into(),
+                            "%cpu=,rss=".into(),
+                        ],
+                        None,
+                    )
+                {
+                    let fields: Vec<_> = metrics.stdout.split_whitespace().collect();
+                    status.cpu_percent = fields.first().and_then(|x| x.parse().ok());
+                    status.memory_bytes = fields
+                        .get(1)
+                        .and_then(|x| x.parse::<u64>().ok())
+                        .map(|kb| kb * 1024);
+                }
+                if service.kind == ServiceType::Process && status.pid.is_none() {
+                    status.state = RuntimeState::Stopped;
+                }
+                Ok(status)
+            }
+            Err(_) => Ok(base_status(name, service, RuntimeState::Stopped)),
+        }
+    }
+    async fn apply(&self, name: &str, service: &Service) -> Result<bool> {
+        let path = self.plist_path(name);
+        fs::create_dir_all(path.parent().unwrap())?;
+        let desired = render_launchd_plist(name, service, &self.paths)?;
+        let changed = match fs::read_to_string(&path) {
+            Ok(existing) if existing == desired => false,
+            Ok(existing) => {
+                if !existing.contains("Owned by vanityctl") {
+                    bail!("refusing to overwrite unowned file {}", path.display());
+                }
+                true
+            }
+            Err(_) => true,
+        };
+        if changed {
+            fs::write(&path, desired).with_context(|| format!("write {}", path.display()))?;
+        }
+        let target = format!("{}/{}", self.domain(), Self::label(name));
+        if !service.enabled {
+            self.runner
+                .run("launchctl", &["bootout".into(), target], None)
+                .ok();
+            return Ok(changed);
+        }
+        if changed {
+            self.runner
+                .run("launchctl", &["bootout".into(), target.clone()], None)
+                .ok();
+            self.runner.run(
+                "launchctl",
+                &[
+                    "bootstrap".into(),
+                    self.domain(),
+                    path.display().to_string(),
+                ],
+                None,
+            )?;
+        }
+        Ok(changed)
+    }
+    async fn start(&self, name: &str, _service: &Service) -> Result<()> {
+        self.runner.run(
+            "launchctl",
+            &[
+                "kickstart".into(),
+                format!("{}/{}", self.domain(), Self::label(name)),
+            ],
+            None,
+        )?;
+        Ok(())
+    }
+    async fn stop(&self, name: &str, _service: &Service) -> Result<()> {
+        self.runner.run(
+            "launchctl",
+            &[
+                "kill".into(),
+                "SIGTERM".into(),
+                format!("{}/{}", self.domain(), Self::label(name)),
+            ],
+            None,
+        )?;
+        Ok(())
+    }
+    async fn restart(&self, name: &str, _service: &Service) -> Result<()> {
+        self.runner.run(
+            "launchctl",
+            &[
+                "kickstart".into(),
+                "-k".into(),
+                format!("{}/{}", self.domain(), Self::label(name)),
+            ],
+            None,
+        )?;
+        Ok(())
+    }
+    async fn logs(&self, name: &str, _service: &Service, lines: usize) -> Result<String> {
+        tail_file(&self.paths.logs.join(format!("{name}.log")), lines)
+    }
+}
+
+fn parse_launchd_pid(value: &str) -> Option<u32> {
+    value
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("pid = ")?.parse().ok())
+}
+
+pub fn render_launchd_plist(name: &str, service: &Service, paths: &ConfigPaths) -> Result<String> {
+    let command = service.command.as_deref().context("command missing")?;
+    let program = expand_path(command)?;
+    let mut args = vec![program.display().to_string()];
+    args.extend(service.args.clone());
+    let args_xml = args
+        .iter()
+        .map(|a| format!("    <string>{}</string>", xml_escape(a)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let env_xml = if service.environment.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "  <key>EnvironmentVariables</key>\n  <dict>\n{}\n  </dict>\n",
+            service
+                .environment
+                .iter()
+                .map(|(k, v)| format!(
+                    "    <key>{}</key><string>{}</string>",
+                    xml_escape(k),
+                    xml_escape(v)
+                ))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
+    let working = service
+        .directory
+        .as_deref()
+        .map(expand_path)
+        .transpose()?
+        .map(|p| {
+            format!(
+                "  <key>WorkingDirectory</key><string>{}</string>\n",
+                xml_escape(&p.display().to_string())
+            )
+        })
+        .unwrap_or_default();
+    let scheduling = match service.kind {
+        ServiceType::Process => format!(
+            "  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><{} />\n",
+            if matches!(service.restart, crate::model::RestartPolicy::No) {
+                "false"
+            } else {
+                "true"
+            }
+        ),
+        ServiceType::Job => {
+            render_schedule(service.schedule.as_deref().context("schedule missing")?)?
+        }
+        _ => bail!("launchd only supports process and job"),
+    };
+    let log = paths.logs.join(format!("{name}.log"));
+    Ok(format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- Owned by vanityctl; do not edit. -->\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key><string>dev.vanityctl.{name}</string>\n  <key>ProgramArguments</key>\n  <array>\n{args_xml}\n  </array>\n{working}{env_xml}{scheduling}  <key>StandardOutPath</key><string>{log}</string>\n  <key>StandardErrorPath</key><string>{log}</string>\n</dict>\n</plist>\n",
+        log = xml_escape(&log.display().to_string())
+    ))
+}
+
+fn render_schedule(cron: &str) -> Result<String> {
+    let fields: Vec<_> = cron.split_whitespace().collect();
+    if fields.len() != 5 {
+        bail!("schedule must contain five cron fields");
+    }
+    let (minute, hour, day, month, weekday) =
+        (fields[0], fields[1], fields[2], fields[3], fields[4]);
+    if let Some(step) = minute.strip_prefix("*/")
+        && hour == "*"
+        && day == "*"
+        && month == "*"
+        && weekday == "*"
+    {
+        let minutes: u64 = step.parse()?;
+        if minutes == 0 {
+            bail!("minute interval cannot be zero");
+        }
+        return Ok(format!(
+            "  <key>StartInterval</key><integer>{}</integer>\n",
+            minutes * 60
+        ));
+    }
+    if day == "*" && month == "*" && weekday == "*" {
+        let m: u8 = minute
+            .parse()
+            .context("V0 launchd schedules support exact daily time or */N minutes")?;
+        let h: u8 = hour.parse()?;
+        if m > 59 || h > 23 {
+            bail!("invalid daily schedule time");
+        }
+        return Ok(format!(
+            "  <key>StartCalendarInterval</key>\n  <dict><key>Hour</key><integer>{h}</integer><key>Minute</key><integer>{m}</integer></dict>\n"
+        ));
+    }
+    bail!("V0 launchd schedules support exact daily time or */N minutes")
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+fn parse_size(value: &str) -> Option<u64> {
+    let value = value.trim();
+    let split = value.find(|c: char| !c.is_ascii_digit() && c != '.')?;
+    let n: f64 = value[..split].parse().ok()?;
+    let unit = value[split..].trim();
+    let multiplier = match unit {
+        "B" => 1.0,
+        "kB" | "KB" => 1_000.0,
+        "KiB" => 1024.0,
+        "MB" => 1_000_000.0,
+        "MiB" => 1_048_576.0,
+        "GB" => 1_000_000_000.0,
+        "GiB" => 1_073_741_824.0,
+        _ => return None,
+    };
+    Some((n * multiplier) as u64)
+}
+fn tail_file(path: &Path, lines: usize) -> Result<String> {
+    let body = fs::read_to_string(path).unwrap_or_default();
+    Ok(body
+        .lines()
+        .rev()
+        .take(lines)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n"))
+}

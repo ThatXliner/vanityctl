@@ -1,0 +1,274 @@
+use std::collections::BTreeMap;
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ServiceType {
+    Docker,
+    Compose,
+    Process,
+    Job,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum RestartPolicy {
+    Always,
+    UnlessStopped,
+    OnFailure,
+    #[default]
+    No,
+}
+
+impl RestartPolicy {
+    pub fn docker_value(&self) -> &'static str {
+        match self {
+            Self::Always => "always",
+            Self::UnlessStopped => "unless-stopped",
+            Self::OnFailure => "on-failure",
+            Self::No => "no",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct BuildConfig {
+    #[serde(default = "default_dockerfile")]
+    pub dockerfile: String,
+    #[serde(default)]
+    pub context: Option<String>,
+    #[serde(default)]
+    pub args: BTreeMap<String, String>,
+}
+
+fn default_dockerfile() -> String {
+    "Dockerfile".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitSource {
+    #[serde(rename = "type", default = "git_type")]
+    pub kind: String,
+    pub repo: String,
+    #[serde(default = "default_branch")]
+    pub branch: String,
+}
+
+fn git_type() -> String {
+    "git".into()
+}
+fn default_branch() -> String {
+    "main".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeployStrategy {
+    #[default]
+    Pull,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum DeployTrigger {
+    Poll {
+        #[serde(default = "default_poll_interval")]
+        interval: String,
+    },
+    Webhook,
+    Github,
+}
+
+fn default_poll_interval() -> String {
+    "60s".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DeployConfig {
+    #[serde(default)]
+    pub auto: bool,
+    #[serde(default)]
+    pub strategy: DeployStrategy,
+    #[serde(default)]
+    pub trigger: Option<DeployTrigger>,
+    #[serde(default)]
+    pub before: Vec<String>,
+    #[serde(default)]
+    pub build: Vec<String>,
+    #[serde(default)]
+    pub after: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExposeConfig {
+    pub domain: String,
+    #[serde(default)]
+    pub dns: bool,
+    #[serde(default)]
+    pub proxy: bool,
+    #[serde(default)]
+    pub tls: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Service {
+    #[serde(rename = "type")]
+    pub kind: ServiceType,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub directory: Option<String>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub image: Option<String>,
+    #[serde(default)]
+    pub build: Option<BuildConfig>,
+    #[serde(default)]
+    pub file: Option<String>,
+    #[serde(default)]
+    pub ports: Vec<String>,
+    #[serde(default)]
+    pub volumes: Vec<String>,
+    #[serde(default)]
+    pub environment: BTreeMap<String, String>,
+    #[serde(default)]
+    pub env_file: Option<String>,
+    #[serde(default)]
+    pub restart: RestartPolicy,
+    #[serde(default)]
+    pub schedule: Option<String>,
+    #[serde(default)]
+    pub source: Option<GitSource>,
+    #[serde(default)]
+    pub deploy: Option<DeployConfig>,
+    #[serde(default)]
+    pub expose: Option<ExposeConfig>,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub enum DnsRecordType {
+    #[default]
+    #[serde(rename = "A", alias = "a")]
+    A,
+    #[serde(rename = "AAAA", alias = "aaaa")]
+    Aaaa,
+    #[serde(rename = "CNAME", alias = "cname")]
+    Cname,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DnsRecordConfig {
+    pub name: String,
+    #[serde(rename = "type", default)]
+    pub kind: DnsRecordType,
+    pub value: String,
+    #[serde(default)]
+    pub proxied: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DnsConfig {
+    pub provider: String,
+    pub zone_id: String,
+    pub token_env: String,
+    #[serde(default = "default_dns_interval")]
+    pub interval: String,
+    #[serde(default)]
+    pub records: Vec<DnsRecordConfig>,
+}
+
+fn default_dns_interval() -> String {
+    "5m".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeState {
+    Running,
+    Stopped,
+    Idle,
+    Disabled,
+    Unknown,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceStatus {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: ServiceType,
+    pub state: RuntimeState,
+    pub health: Option<String>,
+    pub uptime_seconds: Option<u64>,
+    pub cpu_percent: Option<f64>,
+    pub memory_bytes: Option<u64>,
+    pub pid: Option<u32>,
+    pub ports: Vec<String>,
+    pub details: Option<String>,
+    pub deployment: Option<DeploymentSummary>,
+    pub latest_job: Option<JobRun>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DeploymentSummary {
+    pub auto: bool,
+    pub branch: String,
+    pub deployed_commit: Option<String>,
+    pub remote_commit: Option<String>,
+    pub last_deployment: Option<DateTime<Utc>>,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeploymentRecord {
+    pub id: String,
+    pub service: String,
+    pub branch: String,
+    pub commit: Option<String>,
+    pub trigger: String,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: DateTime<Utc>,
+    pub duration_ms: u64,
+    pub status: String,
+    pub log_file: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobRun {
+    pub started_at: DateTime<Utc>,
+    pub duration_ms: u64,
+    pub exit_code: i32,
+    pub log_file: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Event {
+    pub timestamp: DateTime<Utc>,
+    pub kind: String,
+    pub service: Option<String>,
+    pub message: String,
+}

@@ -1,0 +1,4 @@
+version: 1
+api:
+  listen: 127.0.0.1:7788
+services: {}

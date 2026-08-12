@@ -1,0 +1,11 @@
+services:
+  scraper:
+    type: job
+    directory: ~/services/scraper
+    command: ./scrape.sh
+    schedule: "0 4 * * *"
+
+  cloudflare-ddns:
+    type: job
+    command: ~/bin/update-cloudflare.sh
+    schedule: "*/30 * * * *"

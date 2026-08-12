@@ -1,0 +1,72 @@
+version: 1
+
+api:
+  listen: 127.0.0.1:7788
+
+dns:
+  provider: cloudflare
+  zone_id: replace-with-cloudflare-zone-id
+  token_env: CLOUDFLARE_API_TOKEN
+  interval: 5m
+  records:
+    - name: billion.example.com
+      type: A
+      value: public_ip
+      proxied: true
+    - name: mc.example.com
+      type: A
+      value: public_ip
+
+services:
+  billion:
+    type: docker
+    description: Git-backed web application
+    directory: ~/services/billion
+    build:
+      dockerfile: Dockerfile
+      context: .
+    ports: ["3000:3000"]
+    env_file: ~/secrets/billion.env
+    restart: unless-stopped
+    source:
+      type: git
+      repo: git@github.com:ThatXliner/billion.git
+      branch: main
+    deploy:
+      auto: true
+      strategy: pull
+      trigger:
+        type: poll
+        interval: 60s
+
+  minecraft:
+    type: docker
+    description: Minecraft server
+    image: itzg/minecraft-server
+    ports: ["25565:25565"]
+    volumes: ["~/data/minecraft:/data"]
+    environment:
+      EULA: "TRUE"
+      MEMORY: 8G
+    restart: always
+
+  local-llm:
+    type: process
+    description: Native local model server
+    directory: ~/services/llm
+    command: ./serve.sh
+    args: ["--port", "11434"]
+    restart: always
+
+  scraper:
+    type: job
+    description: Daily data scrape
+    directory: ~/services/scraper
+    command: ./scrape.sh
+    schedule: "0 4 * * *"
+
+  cloudflare-ddns:
+    type: job
+    description: Legacy custom DDNS updater (the dns block can replace this)
+    command: ~/bin/update-cloudflare.sh
+    schedule: "*/30 * * * *"
