@@ -210,6 +210,16 @@ to overwrite a generated-path file that lacks its ownership marker.
 `command` is executed directly, not via an implicit shell. Use an explicit script
 or `/bin/sh` plus arguments if shell behavior is actually needed.
 
+Existing user LaunchAgents require an explicit, dry-run-first ownership handoff:
+
+```console
+vanityctl adopt launchd com.example.worker --as worker
+vanityctl adopt launchd com.example.worker --as worker --execute
+```
+
+See [Adopting an existing launchd service](docs/launchd-adoption.md) for the
+supported plist shape, duplicate-process protection, rollback, and limitations.
+
 ### Scheduled jobs
 
 ```yaml

@@ -1,3 +1,4 @@
+pub mod adopt;
 pub mod api;
 pub mod backend;
 pub mod config;
