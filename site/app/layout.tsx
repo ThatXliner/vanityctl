@@ -10,6 +10,9 @@ export const metadata: Metadata = {
   title: "vanityctl — one control plane for this computer",
   description:
     "A single-node declarative control plane for Docker, native processes, scheduled jobs, Git deployments, and DNS.",
+  icons: {
+    icon: "https://bryanhu.com/vanityctl/vanityctl-logo.png",
+  },
   openGraph: {
     title: "vanityctl — one control plane for this computer",
     description: "Everything this machine is responsible for, in one declarative registry.",

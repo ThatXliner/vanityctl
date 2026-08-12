@@ -33,12 +33,13 @@ await cp(resolve(root, "dist/client"), out, { recursive: true });
 const html = (await response.text()).replaceAll(
   'href="/_next/',
   'href="/vanityctl/_next/',
-);
+).replaceAll('src="/_next/', 'src="/vanityctl/_next/')
+  .replaceAll('url(/_next/', 'url(/vanityctl/_next/');
 await writeFile(resolve(out, "index.html"), html);
 await writeFile(resolve(out, ".nojekyll"), "");
 
 const exported = await readFile(resolve(out, "index.html"), "utf8");
-if (!exported.includes("Everything this machine is responsible for.")) {
+if (!exported.includes("Everything this machine")) {
   throw new Error("Static export did not contain the vanityctl landing page");
 }
 

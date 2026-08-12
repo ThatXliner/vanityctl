@@ -29,9 +29,9 @@ test("server-renders the vanityctl landing page", async () => {
 
   const html = await response.text();
   assert.match(html, /<title>vanityctl — One control plane for this computer<\/title>/i);
-  assert.match(html, /Everything this machine is responsible for\./);
+  assert.match(html, /Everything this machine(?:<br\s*\/?>)is responsible for\./);
   assert.match(html, /vanityctl status/);
-  assert.match(html, /Not the smallest Kubernetes\./);
+  assert.match(html, /not a container dashboard/i);
   assert.match(html, /ThatXliner\/vanityctl/);
   assert.doesNotMatch(html, /Your site is taking shape|Building your site/);
 });
@@ -40,13 +40,13 @@ test("renders the operational model and dogfood proof", async () => {
   const html = await (await render("/")).text();
 
   for (const label of [
-    "Containers",
-    "Native processes",
-    "Scheduled jobs",
-    "Git deployments",
-    "YAML registry",
-    "11 existing stacks",
-    "Zero containers replaced",
+    "organized",
+    "unified",
+    "simple",
+    "cat ~/.vanityctl/config.yaml",
+    "11",
+    "container IDs changed",
+    "dogfooded on a real Mac Studio",
   ]) {
     assert.match(html, new RegExp(label));
   }
