@@ -235,7 +235,7 @@ impl DeployCoordinator {
             }
         }
         write_log(log, "build/hooks succeeded; reconciling workload")?;
-        backend.apply(name, service).await?;
+        backend.deploy(name, service).await?;
         if let Some(deploy) = &service.deploy {
             for hook in &deploy.after {
                 run_logged(

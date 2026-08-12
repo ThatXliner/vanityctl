@@ -138,6 +138,8 @@ pub struct Service {
     #[serde(default)]
     pub file: Option<String>,
     #[serde(default)]
+    pub files: Option<Vec<String>>,
+    #[serde(default)]
     pub ports: Vec<String>,
     #[serde(default)]
     pub volumes: Vec<String>,
@@ -155,6 +157,19 @@ pub struct Service {
     pub deploy: Option<DeployConfig>,
     #[serde(default)]
     pub expose: Option<ExposeConfig>,
+}
+
+impl Service {
+    /// Returns the effective ordered Compose file list, normalizing the legacy
+    /// singular `file` key. Configuration validation guarantees that Compose
+    /// services have exactly one of `file` or `files`.
+    pub fn compose_files(&self) -> Vec<&str> {
+        if let Some(files) = &self.files {
+            files.iter().map(String::as_str).collect()
+        } else {
+            self.file.iter().map(String::as_str).collect()
+        }
+    }
 }
 
 fn default_enabled() -> bool {

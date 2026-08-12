@@ -227,6 +227,18 @@ impl Manager {
             .logs(name, &service, lines)
             .await
     }
+    pub async fn compose_operation(&self, name: &str, operation: &str) -> Result<()> {
+        let service = self.service(name)?;
+        if service.kind != ServiceType::Compose {
+            bail!("service {name} is not a compose service");
+        }
+        let backend = self.backends.get(&service.kind);
+        match operation {
+            "pull" => backend.pull(name, &service).await,
+            "build" => backend.build(name, &service).await,
+            _ => bail!("unsupported compose operation {operation}"),
+        }
+    }
     pub async fn deploy(&self, name: &str, trigger: &str, retry: bool) -> Result<DeploymentRecord> {
         let service = self.service(name)?;
         self.deployer
@@ -270,6 +282,22 @@ impl Manager {
             );
             if service.env_file.is_some() {
                 object.insert("envFile".into(), json!("configured (value hidden)"));
+            }
+            if service.kind == ServiceType::Compose {
+                let directory = expand_path(service.directory.as_deref().unwrap())?;
+                let files = service.compose_files();
+                object.remove("file");
+                object.insert("files".into(), json!(files));
+                object.insert(
+                    "resolvedFiles".into(),
+                    json!(
+                        service
+                            .compose_files()
+                            .into_iter()
+                            .map(|file| crate::config::resolve_compose_file(&directory, file))
+                            .collect::<Result<Vec<_>>>()?
+                    ),
+                );
             }
         }
         Ok(value)

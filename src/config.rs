@@ -154,9 +154,7 @@ impl HostConfig {
                 ServiceType::Docker if svc.image.is_none() && svc.build.is_none() => {
                     bail!("service {name}: docker requires image or build")
                 }
-                ServiceType::Compose if svc.directory.is_none() => {
-                    bail!("service {name}: compose requires directory")
-                }
+                ServiceType::Compose => validate_compose(name, svc)?,
                 ServiceType::Process | ServiceType::Job if svc.command.is_none() => {
                     bail!("service {name}: {:?} requires command", svc.kind)
                 }
@@ -171,6 +169,9 @@ impl HostConfig {
             }
             if svc.kind != ServiceType::Job && svc.schedule.is_some() {
                 bail!("service {name}: schedule is only valid for jobs");
+            }
+            if svc.kind != ServiceType::Compose && (svc.file.is_some() || svc.files.is_some()) {
+                bail!("service {name}: file and files are only valid for compose services");
             }
             if let Some(source) = &svc.source
                 && source.kind != "git"
@@ -221,6 +222,79 @@ impl HostConfig {
         }
         Ok(())
     }
+}
+
+fn validate_compose(name: &str, service: &Service) -> Result<()> {
+    let directory = service
+        .directory
+        .as_deref()
+        .with_context(|| format!("service {name}: compose requires directory"))?;
+    match (&service.file, &service.files) {
+        (Some(_), Some(_)) => bail!(
+            "service {name}: compose accepts either legacy file or files, not both; migrate to files"
+        ),
+        (None, None) => bail!(
+            "service {name}: compose requires a non-empty files list (legacy file is also accepted)"
+        ),
+        (Some(file), None) if file.trim().is_empty() => {
+            bail!("service {name}: compose file cannot be empty")
+        }
+        (None, Some(files)) if files.is_empty() => {
+            bail!("service {name}: compose files must not be empty")
+        }
+        (None, Some(files)) if files.iter().any(|file| file.trim().is_empty()) => {
+            bail!("service {name}: compose files cannot contain an empty path")
+        }
+        _ => {}
+    }
+
+    let directory = expand_path(directory)?;
+    if !directory.exists() {
+        if service.source.is_none() {
+            bail!(
+                "service {name}: compose directory {} does not exist",
+                directory.display()
+            );
+        }
+        return Ok(());
+    }
+    if !directory.is_dir() {
+        bail!(
+            "service {name}: compose directory {} is not a directory",
+            directory.display()
+        );
+    }
+    if service.source.is_some() && !directory.join(".git").exists() {
+        // `apply` will clone into an existing empty directory, then the backend
+        // validates every file before invoking Docker.
+        return Ok(());
+    }
+    let mut files = HashSet::new();
+    for file in service.compose_files() {
+        let path = resolve_compose_file(&directory, file)?;
+        if !files.insert(path.clone()) {
+            bail!(
+                "service {name}: compose file {} is listed more than once",
+                path.display()
+            );
+        }
+        fs::File::open(&path).with_context(|| {
+            format!(
+                "service {name}: compose file {} is not readable",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+pub fn resolve_compose_file(directory: &Path, file: &str) -> Result<PathBuf> {
+    let path = expand_path(file)?;
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        directory.join(path)
+    })
 }
 
 #[derive(Deserialize)]

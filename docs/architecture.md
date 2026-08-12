@@ -43,8 +43,11 @@ proxy/TLS, dashboard config editing, and multi-host orchestration are deferred.
 
 ## Backend contract
 
-Backends implement status, apply, lifecycle, and log operations. Command execution
+Backends implement status, apply, lifecycle, and log operations. Compose additionally
+supports ordered pull and build operations. Its effective file list is resolved from
+the project directory and included in an on-disk reconciliation fingerprint, so a
+second unchanged apply is a no-op while editing any override file causes reconciliation.
+Command execution
 is injected, which lets tests validate dispatch and generated commands without
 touching real Docker or launchd resources. Deployment and DNS are coordinators above
 the workload backends; neither is encoded as a special Docker behavior.
-

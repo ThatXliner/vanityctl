@@ -185,11 +185,21 @@ Compose remains responsible for its application's internal topology:
 immich:
   type: compose
   directory: ~/services/immich
-  file: compose.yaml
+  files:
+    - compose.yaml
+    - compose.production.yaml
 ```
 
 vanityctl runs the matching `docker compose` lifecycle and log commands from that
-directory. It does not rewrite the Compose file.
+directory. File order is preserved for every command. The singular `file:` key is
+still accepted for existing configurations, but new configurations should use
+`files:`. Relative paths resolve from `directory`; validation fails before mutation
+if any file is missing or unreadable.
+
+`vanityctl pull immich` and `vanityctl build immich` expose Compose's corresponding
+operations. A Git deployment pulls and builds before replacing the running stack.
+Repeated `apply` calls skip unchanged Compose projects; changes to any configured
+Compose file invalidate the reconciliation fingerprint.
 
 ### Native processes
 
@@ -322,6 +332,7 @@ vanityctl list [--json]
 vanityctl status [SERVICE] [--json]       (alias: ps)
 vanityctl describe SERVICE [--json]
 vanityctl start|stop|restart SERVICE
+vanityctl pull|build SERVICE              (Compose services)
 vanityctl logs SERVICE [-f] [--lines N]
 vanityctl apply
 vanityctl deploy SERVICE [--retry]

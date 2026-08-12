@@ -48,6 +48,8 @@ pub async fn serve(manager: Arc<Manager>) -> Result<()> {
         .route("/api/services/{name}/start", post(start))
         .route("/api/services/{name}/stop", post(stop))
         .route("/api/services/{name}/restart", post(restart))
+        .route("/api/services/{name}/pull", post(pull))
+        .route("/api/services/{name}/build", post(build))
         .route("/api/services/{name}/deploy", post(deploy))
         .route("/api/services/{name}/deploy/auto-enable", post(auto_enable))
         .route(
@@ -197,6 +199,20 @@ async fn restart(
     Path(name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     s.manager.action(&name, "restart").await?;
+    Ok(Json(json!({"ok":true})))
+}
+async fn pull(
+    State(s): State<ApiState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    s.manager.compose_operation(&name, "pull").await?;
+    Ok(Json(json!({"ok":true})))
+}
+async fn build(
+    State(s): State<ApiState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    s.manager.compose_operation(&name, "build").await?;
     Ok(Json(json!({"ok":true})))
 }
 #[derive(Deserialize)]
