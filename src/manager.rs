@@ -1,9 +1,15 @@
-use std::{collections::BTreeMap, fs, sync::Arc, time::Instant};
+use std::{
+    collections::BTreeMap,
+    fs,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::Serialize;
 use serde_json::{Value, json};
+use sysinfo::System;
 
 use crate::{
     backend::BackendSet,
@@ -22,6 +28,7 @@ pub struct Manager {
     state: Arc<StateStore>,
     deployer: DeployCoordinator,
     dns: DnsReconciler,
+    system: Mutex<System>,
 }
 
 #[derive(Debug, Serialize)]
@@ -40,7 +47,17 @@ pub struct DoctorReport {
     pub os: String,
     pub hostname: String,
     pub config: String,
+    pub resources: HostResources,
     pub checks: Vec<DoctorCheck>,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostResources {
+    pub cpu_percent: f64,
+    pub memory_used_bytes: u64,
+    pub memory_total_bytes: u64,
+    pub gpu_percent: Option<f64>,
+    pub gpu_memory_bytes: Option<u64>,
 }
 #[derive(Debug, Serialize)]
 pub struct DoctorCheck {
@@ -60,6 +77,7 @@ impl Manager {
             backends: BackendSet::new(runner.clone(), paths.clone()),
             deployer: DeployCoordinator::new(runner.clone(), state.clone(), paths.clone()),
             dns: DnsReconciler::new(state.clone()),
+            system: Mutex::new(System::new_all()),
             paths,
             runner,
             state,
@@ -446,7 +464,44 @@ impl Manager {
             os: std::env::consts::OS.into(),
             hostname: hostname(),
             config: self.paths.config.display().to_string(),
+            resources: self.host_resources(),
             checks,
+        }
+    }
+    fn host_resources(&self) -> HostResources {
+        let mut system = self
+            .system
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        system.refresh_cpu_usage();
+
+        #[cfg(target_os = "macos")]
+        let (gpu_percent, gpu_memory_bytes) = self
+            .runner
+            .run(
+                "ioreg",
+                &[
+                    "-r".into(),
+                    "-c".into(),
+                    "AGXAccelerator".into(),
+                    "-l".into(),
+                    "-w".into(),
+                    "0".into(),
+                ],
+                None,
+            )
+            .ok()
+            .map(|output| parse_apple_gpu_metrics(&output.stdout))
+            .unwrap_or((None, None));
+        #[cfg(not(target_os = "macos"))]
+        let (gpu_percent, gpu_memory_bytes) = (None, None);
+
+        HostResources {
+            cpu_percent: system.global_cpu_usage() as f64,
+            memory_used_bytes: system.used_memory(),
+            memory_total_bytes: system.total_memory(),
+            gpu_percent,
+            gpu_memory_bytes,
         }
     }
     pub fn agent_context(&self) -> Result<String> {
@@ -567,4 +622,38 @@ fn hostname() -> String {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".into())
+}
+
+fn parse_apple_gpu_metrics(output: &str) -> (Option<f64>, Option<u64>) {
+    let value_after = |key: &str| {
+        output.split(key).nth(1).and_then(|tail| {
+            tail.split_once('=')
+                .map(|(_, value)| value)
+                .and_then(|value| {
+                    value
+                        .trim_start()
+                        .split(|c: char| !c.is_ascii_digit() && c != '.')
+                        .find(|part| !part.is_empty())
+                })
+                .and_then(|value| value.parse::<f64>().ok())
+        })
+    };
+    (
+        value_after("Device Utilization %"),
+        value_after("In use system memory\"").map(|value| value as u64),
+    )
+}
+
+#[cfg(test)]
+mod metrics_tests {
+    use super::parse_apple_gpu_metrics;
+
+    #[test]
+    fn parses_apple_gpu_utilization_and_memory() {
+        let input = r#""PerformanceStatistics" = {"In use system memory"=1007599616,"Device Utilization %"=71}"#;
+        assert_eq!(
+            parse_apple_gpu_metrics(input),
+            (Some(71.0), Some(1_007_599_616))
+        );
+    }
 }

@@ -69,6 +69,11 @@ pub struct ApiConfig {
     pub listen: String,
     #[serde(default)]
     pub token_env: Option<String>,
+    #[serde(default)]
+    pub token_file: Option<String>,
+    /// Expose only explicitly allowlisted, non-mutating API routes without a token.
+    #[serde(default)]
+    pub public_read_only: bool,
 }
 
 fn default_listen() -> String {
@@ -79,7 +84,33 @@ impl Default for ApiConfig {
         Self {
             listen: default_listen(),
             token_env: None,
+            token_file: None,
+            public_read_only: false,
         }
+    }
+}
+
+impl ApiConfig {
+    pub fn resolve_token(&self) -> Result<Option<String>> {
+        let token = match (&self.token_env, &self.token_file) {
+            (Some(_), Some(_)) => bail!("api may set either token_env or token_file, not both"),
+            (Some(name), None) => Some(
+                env::var(name)
+                    .with_context(|| format!("read API token from environment variable {name}"))?,
+            ),
+            (None, Some(path)) => Some(
+                fs::read_to_string(expand_path(path)?)
+                    .with_context(|| format!("read API token file {path}"))?,
+            ),
+            (None, None) => None,
+        };
+        Ok(token
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()))
+    }
+
+    fn has_token_source(&self) -> bool {
+        self.token_env.is_some() || self.token_file.is_some()
     }
 }
 
@@ -138,9 +169,17 @@ impl HostConfig {
         }
         if !self.api.listen.starts_with("127.0.0.1:")
             && !self.api.listen.starts_with("[::1]:")
-            && self.api.token_env.is_none()
+            && !self.api.has_token_source()
         {
-            bail!("non-loopback api.listen requires api.token_env");
+            bail!("non-loopback api.listen requires api.token_env or api.token_file");
+        }
+        if self.api.token_env.is_some() && self.api.token_file.is_some() {
+            bail!("api may set either token_env or token_file, not both");
+        }
+        if self.api.public_read_only && !self.api.has_token_source() {
+            bail!(
+                "api.public_read_only requires api.token_env or api.token_file so mutating routes remain protected"
+            );
         }
         for (name, svc) in &self.services {
             if name.is_empty()

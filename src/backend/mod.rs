@@ -381,6 +381,23 @@ impl ComposeBackend {
         Ok(())
     }
 
+    fn populate_metrics(&self, status: &mut ServiceStatus, container_ids: &[String]) {
+        if container_ids.is_empty() {
+            return;
+        }
+        let mut args = vec![
+            "stats".into(),
+            "--no-stream".into(),
+            "--format".into(),
+            "{{json .}}".into(),
+        ];
+        args.extend(container_ids.iter().cloned());
+        let Ok(output) = self.runner.run("docker", &args, None) else {
+            return;
+        };
+        (status.cpu_percent, status.memory_bytes) = parse_docker_stats(&output.stdout);
+    }
+
     fn reconcile(&self, name: &str, service: &Service, force: bool) -> Result<bool> {
         let (mut args, cwd) = Self::base(service)?;
         let fingerprint = Self::fingerprint(service, &cwd)?;
@@ -427,7 +444,16 @@ impl Backend for ComposeBackend {
         ]);
         match self.runner.run("docker", &args, Some(&cwd)) {
             Ok(out) if !out.stdout.trim().is_empty() => {
-                Ok(base_status(name, service, RuntimeState::Running))
+                let container_ids = out
+                    .stdout
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                let mut status = base_status(name, service, RuntimeState::Running);
+                self.populate_metrics(&mut status, &container_ids);
+                Ok(status)
             }
             _ => Ok(base_status(name, service, RuntimeState::Stopped)),
         }
@@ -757,6 +783,31 @@ fn parse_size(value: &str) -> Option<u64> {
     };
     Some((n * multiplier) as u64)
 }
+fn parse_docker_stats(output: &str) -> (Option<f64>, Option<u64>) {
+    let mut cpu = None;
+    let mut memory = None;
+    for line in output.lines().filter(|line| !line.trim().is_empty()) {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(value) = value
+            .get("CPUPerc")
+            .and_then(Value::as_str)
+            .and_then(|value| value.trim_end_matches('%').parse::<f64>().ok())
+        {
+            cpu = Some(cpu.unwrap_or(0.0) + value);
+        }
+        if let Some(value) = value
+            .get("MemUsage")
+            .and_then(Value::as_str)
+            .and_then(|value| value.split('/').next())
+            .and_then(parse_size)
+        {
+            memory = Some(memory.unwrap_or(0_u64).saturating_add(value));
+        }
+    }
+    (cpu, memory)
+}
 fn tail_file(path: &Path, lines: usize) -> Result<String> {
     let body = fs::read_to_string(path).unwrap_or_default();
     Ok(body
@@ -768,4 +819,19 @@ fn tail_file(path: &Path, lines: usize) -> Result<String> {
         .rev()
         .collect::<Vec<_>>()
         .join("\n"))
+}
+
+#[cfg(test)]
+mod metric_tests {
+    use super::parse_docker_stats;
+
+    #[test]
+    fn aggregates_compose_container_stats() {
+        let stats = concat!(
+            r#"{"CPUPerc":"1.25%","MemUsage":"512MiB / 8GiB"}"#,
+            "\n",
+            r#"{"CPUPerc":"2.75%","MemUsage":"1.5GiB / 8GiB"}"#,
+        );
+        assert_eq!(parse_docker_stats(stats), (Some(4.0), Some(2_147_483_648)));
+    }
 }

@@ -23,18 +23,14 @@ struct ApiState {
 #[derive(Clone)]
 struct AuthState {
     token: Option<String>,
+    public_read_only: bool,
 }
 
 pub async fn serve(manager: Arc<Manager>) -> Result<()> {
     let config = manager.config()?;
     let listen = config.api.listen.clone();
-    let token = config
-        .api
-        .token_env
-        .as_ref()
-        .map(std::env::var)
-        .transpose()?
-        .filter(|v| !v.is_empty());
+    let token = config.api.resolve_token()?;
+    let public_read_only = config.api.public_read_only;
     manager.start_auto_deployers()?;
     manager.start_dns_reconciler()?;
     let state = ApiState { manager };
@@ -73,7 +69,10 @@ pub async fn serve(manager: Arc<Manager>) -> Result<()> {
         .route("/api/dns/reconcile", post(dns_reconcile))
         .with_state(state)
         .layer(middleware::from_fn_with_state(
-            AuthState { token },
+            AuthState {
+                token,
+                public_read_only,
+            },
             authenticate,
         ));
     let listener = TcpListener::bind(&listen).await?;
@@ -108,6 +107,12 @@ async fn authenticate(
     request: axum::extract::Request,
     next: Next,
 ) -> Response {
+    // The dashboard shell has no machine data. Public read-only mode opens only
+    // this explicit list; configuration, logs, agent context, and every write
+    // remain token-protected.
+    if request.uri().path() == "/" {
+        return next.run(request).await;
+    }
     let Some(token) = auth.token else {
         return next.run(request).await;
     };
@@ -115,7 +120,8 @@ async fn authenticate(
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "));
-    if supplied == Some(token.as_str()) {
+    if supplied == Some(token.as_str()) || (auth.public_read_only && is_public_read_route(&request))
+    {
         next.run(request).await
     } else {
         (
@@ -124,6 +130,26 @@ async fn authenticate(
         )
             .into_response()
     }
+}
+
+fn is_public_read_route(request: &axum::extract::Request) -> bool {
+    if request.method() != axum::http::Method::GET {
+        return false;
+    }
+    let path = request.uri().path();
+    matches!(
+        path,
+        "/api/services"
+            | "/api/status"
+            | "/api/jobs"
+            | "/api/system"
+            | "/api/events"
+            | "/api/events/stream"
+            | "/api/dns"
+    ) || path
+        .strip_prefix("/api/services/")
+        .and_then(|tail| tail.strip_suffix("/status"))
+        .is_some_and(|name| !name.is_empty() && !name.contains('/'))
 }
 
 struct ApiError(anyhow::Error);
@@ -349,14 +375,56 @@ async fn dashboard() -> Html<&'static str> {
 const DASHBOARD: &str = r##"<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>vanityctl</title><style>
-:root{color-scheme:dark;--bg:#0b0d10;--panel:#15191f;--muted:#8993a4;--line:#282f39;--green:#54d68b;--red:#ff667d;--amber:#ffc857}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#edf1f7;font:14px ui-monospace,SFMono-Regular,Menlo,monospace}header{display:flex;justify-content:space-between;align-items:center;padding:22px 28px;border-bottom:1px solid var(--line)}h1{font-size:18px;margin:0}h2{font-size:15px;margin:28px 0 12px}.wrap{max-width:1200px;margin:auto;padding:26px}.summary{color:var(--muted);margin-bottom:18px}.grid{display:grid;gap:12px}.service{display:grid;grid-template-columns:2fr 1fr 1fr 1.4fr .7fr auto;gap:14px;align-items:center;padding:16px 18px;background:var(--panel);border:1px solid var(--line);border-radius:10px}.panel{padding:16px 18px;background:var(--panel);border:1px solid var(--line);border-radius:10px}.name{font-weight:700}.muted{color:var(--muted)}.running,.synced{color:var(--green)}.failed,.unknown{color:var(--red)}.stopped,.idle{color:var(--amber)}button{background:#232a34;color:#fff;border:1px solid #394352;border-radius:6px;padding:7px 10px;cursor:pointer}button:hover{background:#303947}dialog{width:min(850px,90vw);background:var(--panel);color:#fff;border:1px solid var(--line);border-radius:12px}pre{white-space:pre-wrap;max-height:55vh;overflow:auto;background:#090b0e;padding:16px;border-radius:8px}.actions{display:flex;gap:8px;justify-content:flex-end}@media(max-width:700px){.service{grid-template-columns:1fr 1fr}.hide-small{display:none}}</style></head>
-<body><header><h1>vanityctl / this computer</h1><span id="host" class="muted">loading…</span></header><main class="wrap"><div id="summary" class="summary"></div><div id="services" class="grid"></div><section id="dnsSection" hidden><h2>DNS</h2><div id="dns" class="panel"></div></section><h2>Recent activity</h2><div id="activity" class="panel muted">No activity yet.</div></main><dialog id="detail"><div id="detailBody"></div><form method="dialog" class="actions"><button>Close</button></form></dialog>
+:root{color-scheme:dark;--bg:#0b0d10;--panel:#15191f;--muted:#8993a4;--line:#282f39;--green:#54d68b;--red:#ff667d;--amber:#ffc857}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#edf1f7;font:14px ui-monospace,SFMono-Regular,Menlo,monospace}header{display:flex;justify-content:space-between;align-items:center;padding:22px 28px;border-bottom:1px solid var(--line)}h1{font-size:18px;margin:0}h2{font-size:15px;margin:28px 0 12px}.wrap{max-width:1200px;margin:auto;padding:26px}.summary{color:var(--muted);margin-bottom:18px}.resource-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:18px}.resource{padding:14px 16px;background:var(--panel);border:1px solid var(--line);border-radius:10px}.resource strong{display:block;font-size:18px;margin-top:7px}.grid{display:grid;gap:12px}.service{display:grid;grid-template-columns:2fr 1fr 1fr 1.3fr .7fr .9fr auto;gap:14px;align-items:center;padding:16px 18px;background:var(--panel);border:1px solid var(--line);border-radius:10px}.panel{padding:16px 18px;background:var(--panel);border:1px solid var(--line);border-radius:10px}.name{font-weight:700}.muted{color:var(--muted)}.running,.synced{color:var(--green)}.failed,.unknown{color:var(--red)}.stopped,.idle{color:var(--amber)}button{background:#232a34;color:#fff;border:1px solid #394352;border-radius:6px;padding:7px 10px;cursor:pointer}button:hover{background:#303947}dialog{width:min(850px,90vw);background:var(--panel);color:#fff;border:1px solid var(--line);border-radius:12px}pre{white-space:pre-wrap;max-height:55vh;overflow:auto;background:#090b0e;padding:16px;border-radius:8px}.actions{display:flex;gap:8px;justify-content:flex-end}@media(max-width:700px){.resource-grid{grid-template-columns:1fr}.service{grid-template-columns:1fr 1fr}.hide-small{display:none}}</style></head>
+<body><header><h1>vanityctl / this computer</h1><span id="host" class="muted">loading…</span></header><main class="wrap"><div id="summary" class="summary"></div><div id="resources" class="resource-grid"></div><div id="services" class="grid"></div><section id="dnsSection" hidden><h2>DNS</h2><div id="dns" class="panel"></div></section><h2>Recent activity</h2><div id="activity" class="panel muted">No activity yet.</div></main><dialog id="detail"><div id="detailBody"></div><form method="dialog" class="actions"><button>Close</button></form></dialog>
 <script>
 const esc=s=>String(s??'—').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const bytes=n=>{if(n==null)return '—';const u=['B','KiB','MiB','GiB','TiB'];let i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return n.toFixed(i>1?1:0)+' '+u[i]};
 let token=sessionStorage.getItem('vanityctl-token');
 async function api(path,opt={}){opt.headers={...(opt.headers||{}),...(token?{Authorization:'Bearer '+token}:{})};const r=await fetch('/api'+path,opt);if(r.status===401&&!token){token=prompt('hostd API token');if(token){sessionStorage.setItem('vanityctl-token',token);return api(path,opt)}}if(!r.ok)throw Error((await r.json()).error||r.statusText);return (r.headers.get('content-type')||'').includes('json')?r.json():r.text()}
-async function load(){try{const [sys,rows,events]=await Promise.all([api('/system'),api('/status'),api('/events')]);host.textContent=sys.hostname+' · '+sys.os+' · v'+sys.version;summary.textContent=rows.length+' services · '+rows.filter(x=>x.state==='running').length+' running · '+rows.filter(x=>x.health==='error'||x.state==='failed').length+' need attention';services.innerHTML=rows.map(row=>`<div class="service" onclick="show('${esc(row.name)}')"><span class="name">${esc(row.name)}</span><span class="muted">${esc(row.type)}</span><span class="${esc(row.state)}">● ${esc(row.state)}</span><span class="hide-small muted">${esc(row.deployment?.status||(row.latestJob?.exitCode===0?'last run ✓':'—'))}</span><span class="hide-small muted">${row.cpuPercent==null?'—':esc(row.cpuPercent.toFixed(1)+'% CPU')}</span><span><button onclick="event.stopPropagation();act('${esc(row.name)}','${row.type==='job'?'run':'restart'}')">${row.type==='job'?'Run':'Restart'}</button></span></div>`).join('');activity.innerHTML=events.slice(-8).reverse().map(e=>`<div>${esc(new Date(e.timestamp).toLocaleTimeString())} · ${esc(e.message)}</div>`).join('')||'No activity yet.';try{const d=await api('/dns');dnsSection.hidden=false;dns.innerHTML=`<div>Public IP: ${esc(d.publicIp)} · ${d.records.filter(r=>r.synced).length}/${d.records.length} synced <button onclick="reconcileDns()">Reconcile now</button></div>`}catch(_){dnsSection.hidden=true}}catch(e){summary.textContent=e.message}}
+async function load(){try{const [sys,rows,events]=await Promise.all([api('/system'),api('/status'),api('/events')]);host.textContent=sys.hostname+' · '+sys.os+' · v'+sys.version;summary.textContent=rows.length+' services · '+rows.filter(x=>x.state==='running').length+' running · '+rows.filter(x=>x.health==='error'||x.state==='failed').length+' need attention';const r=sys.resources||{};resources.innerHTML=`<div class="resource"><span class="muted">CPU</span><strong>${r.cpuPercent==null?'—':esc(r.cpuPercent.toFixed(1)+'%')}</strong></div><div class="resource"><span class="muted">RAM</span><strong>${esc(bytes(r.memoryUsedBytes))} <span class="muted">/ ${esc(bytes(r.memoryTotalBytes))}</span></strong></div><div class="resource"><span class="muted">GPU</span><strong>${r.gpuPercent==null?'unavailable':esc(r.gpuPercent.toFixed(1)+'%')} ${r.gpuMemoryBytes==null?'':`<span class="muted">· ${esc(bytes(r.gpuMemoryBytes))}</span>`}</strong></div>`;services.innerHTML=rows.map(row=>`<div class="service" onclick="show('${esc(row.name)}')"><span class="name">${esc(row.name)}</span><span class="muted">${esc(row.type)}</span><span class="${esc(row.state)}">● ${esc(row.state)}</span><span class="hide-small muted">${esc(row.deployment?.status||(row.latestJob?.exitCode===0?'last run ✓':'—'))}</span><span class="hide-small muted">${row.cpuPercent==null?'—':esc(row.cpuPercent.toFixed(1)+'% CPU')}</span><span class="hide-small muted">${row.memoryBytes==null?'—':esc(bytes(row.memoryBytes))+' RAM'}</span><span><button onclick="event.stopPropagation();act('${esc(row.name)}','${row.type==='job'?'run':'restart'}')">${row.type==='job'?'Run':'Restart'}</button></span></div>`).join('');activity.innerHTML=events.slice(-8).reverse().map(e=>`<div>${esc(new Date(e.timestamp).toLocaleTimeString())} · ${esc(e.message)}</div>`).join('')||'No activity yet.';try{const d=await api('/dns');dnsSection.hidden=false;dns.innerHTML=`<div>Public IP: ${esc(d.publicIp)} · ${d.records.filter(r=>r.synced).length}/${d.records.length} synced <button onclick="reconcileDns()">Reconcile now</button></div>`}catch(_){dnsSection.hidden=true}}catch(e){summary.textContent=e.message}}
 async function reconcileDns(){try{await api('/dns/reconcile',{method:'POST'});await load()}catch(e){alert(e.message)}}
 async function show(name){const [desc,status,logs]=await Promise.all([api('/services/'+name),api('/services/'+name+'/status'),api('/services/'+name+'/logs?lines=200')]);detailBody.innerHTML=`<h2>${esc(name)}</h2><pre>${esc(JSON.stringify({status,configuration:desc},null,2))}</pre><h3>Recent logs</h3><pre>${esc(logs)}</pre>`;detail.showModal()}
 async function act(name,action){try{await api((action==='run'?'/jobs/':'/services/')+name+'/'+action,{method:'POST'});await load()}catch(e){alert(e.message)}}load();setInterval(load,5000);
 </script></body></html>"##;
+
+#[cfg(test)]
+mod auth_tests {
+    use super::is_public_read_route;
+    use axum::{body::Body, http::Request};
+
+    fn request(method: &str, path: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[test]
+    fn public_read_only_allowlist_excludes_secrets_and_writes() {
+        for path in [
+            "/api/services",
+            "/api/status",
+            "/api/services/web/status",
+            "/api/jobs",
+            "/api/system",
+            "/api/events",
+            "/api/events/stream",
+            "/api/dns",
+        ] {
+            assert!(is_public_read_route(&request("GET", path)), "{path}");
+        }
+        for (method, path) in [
+            ("GET", "/api/services/web"),
+            ("GET", "/api/services/web/logs"),
+            ("GET", "/api/agent-context"),
+            ("POST", "/api/services/web/restart"),
+            ("POST", "/api/jobs/backup/run"),
+            ("POST", "/api/apply"),
+            ("POST", "/api/dns/reconcile"),
+        ] {
+            assert!(!is_public_read_route(&request(method, path)), "{path}");
+        }
+    }
+}
