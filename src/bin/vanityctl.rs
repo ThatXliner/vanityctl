@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use reqwest::{Client, Method, Response};
 use serde_json::Value;
-use vanityctl::{ConfigPaths, HostConfig};
+use vanityctl::{ConfigPaths, HostConfig, adopt::LaunchdAdopter, runner::SystemRunner};
 
 #[derive(Parser)]
 #[command(
@@ -24,6 +24,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Safely import an existing resource into vanityctl ownership
+    Adopt {
+        #[command(subcommand)]
+        command: AdoptCommand,
+    },
     List,
     #[command(alias = "ps")]
     Status {
@@ -90,6 +95,19 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum AdoptCommand {
+    /// Inspect and adopt an existing user LaunchAgent
+    Launchd {
+        label: String,
+        #[arg(long = "as", value_name = "SERVICE")]
+        service: String,
+        /// Perform the handoff. Without this flag, only a redacted plan is shown.
+        #[arg(long)]
+        execute: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum ConfigCommand {
     Validate,
 }
@@ -147,6 +165,25 @@ impl Api {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Command::Adopt {
+        command:
+            AdoptCommand::Launchd {
+                label,
+                service,
+                execute,
+            },
+    } = &cli.command
+    {
+        let adopter =
+            LaunchdAdopter::discover(ConfigPaths::discover()?, std::sync::Arc::new(SystemRunner))?;
+        let result = adopter.adopt(label, service, *execute)?;
+        if cli.json {
+            print_json(&serde_json::to_value(result)?)?;
+        } else {
+            println!("{}", result.render());
+        }
+        return Ok(());
+    }
     if matches!(cli.command, Command::Config { .. }) {
         let config = HostConfig::load(&ConfigPaths::discover()?)?;
         println!(
@@ -247,6 +284,7 @@ async fn main() -> Result<()> {
             )?,
         },
         Command::Dashboard => println!("{}", api.base),
+        Command::Adopt { .. } => unreachable!(),
         Command::Config { .. } => unreachable!(),
     }
     Ok(())
