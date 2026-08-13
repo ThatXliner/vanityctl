@@ -10,6 +10,19 @@ pub enum ServiceType {
     Compose,
     Process,
     Job,
+    Plugin,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GeneratedByPlugin {
+    pub instance: String,
+    pub plugin: String,
+    pub version: String,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    pub materializes_source: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -157,6 +170,16 @@ pub struct Service {
     pub deploy: Option<DeployConfig>,
     #[serde(default)]
     pub expose: Option<ExposeConfig>,
+    /// Plugin alias for `type: plugin` declarations. Plugin declarations are
+    /// expanded during config loading and never reach a runtime backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub config: BTreeMap<String, serde_yaml::Value>,
+    #[serde(default, skip_serializing)]
+    pub secrets: BTreeMap<String, String>,
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub generated_by: Option<GeneratedByPlugin>,
 }
 
 impl Service {

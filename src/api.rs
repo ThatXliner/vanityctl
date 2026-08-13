@@ -60,6 +60,10 @@ pub async fn serve(manager: Arc<Manager>) -> Result<()> {
         .route("/api/jobs/{name}/enable", post(enable_job))
         .route("/api/jobs/{name}/disable", post(disable_job))
         .route("/api/apply", post(apply))
+        .route("/api/apply/plan", get(apply_plan))
+        .route("/api/plugins", get(plugins))
+        .route("/api/plugins/library", get(plugin_library))
+        .route("/api/plugins/{name}", get(plugin))
         .route("/api/config/validate", get(validate))
         .route("/api/system", get(system))
         .route("/api/events", get(events))
@@ -170,6 +174,18 @@ impl IntoResponse for ApiError {
 
 async fn list_services(State(s): State<ApiState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!(s.manager.list()?)))
+}
+async fn plugins(State(s): State<ApiState>) -> Result<Json<Value>, ApiError> {
+    Ok(Json(json!(s.manager.plugins()?)))
+}
+async fn plugin_library(State(s): State<ApiState>) -> Result<Json<Value>, ApiError> {
+    Ok(Json(s.manager.plugin_library()))
+}
+async fn plugin(
+    State(s): State<ApiState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(json!(s.manager.plugin(&name)?)))
 }
 async fn statuses(State(s): State<ApiState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!(s.manager.statuses().await?)))
@@ -326,10 +342,13 @@ async fn disable_job(
 async fn apply(State(s): State<ApiState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!(s.manager.apply().await?)))
 }
+async fn apply_plan(State(s): State<ApiState>) -> Result<Json<Value>, ApiError> {
+    Ok(Json(json!(s.manager.apply_plan()?)))
+}
 async fn validate(State(s): State<ApiState>) -> Result<Json<Value>, ApiError> {
     let c = s.manager.config()?;
     Ok(Json(
-        json!({"valid":true,"version":c.version,"services":c.services.len()}),
+        json!({"valid":true,"version":c.version,"services":c.services.len(),"plugins":c.resolved_plugins.len()}),
     ))
 }
 async fn system(State(s): State<ApiState>) -> Json<Value> {

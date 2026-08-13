@@ -67,7 +67,16 @@ enum Command {
         #[arg(long)]
         retry: bool,
     },
-    Apply,
+    Apply {
+        /// Validate and show resolved plugin/services without changing the machine.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Inspect resolved plugin instances and the bundled plugin library.
+    Plugin {
+        #[command(subcommand)]
+        command: Option<PluginCommand>,
+    },
     Run {
         service: String,
     },
@@ -116,6 +125,13 @@ enum DnsCommand {
     Status,
     Records,
     Reconcile,
+}
+
+#[derive(Subcommand)]
+enum PluginCommand {
+    List,
+    Describe { instance: String },
+    Library,
 }
 
 struct Api {
@@ -187,8 +203,9 @@ async fn main() -> Result<()> {
     if matches!(cli.command, Command::Config { .. }) {
         let config = HostConfig::load(&ConfigPaths::discover()?)?;
         println!(
-            "configuration valid: {} services (schema v{})",
+            "configuration valid: {} services, {} plugins (schema v{})",
             config.services.len(),
+            config.resolved_plugins.len(),
             config.version
         );
         return Ok(());
@@ -243,7 +260,26 @@ async fn main() -> Result<()> {
             name,
             retry,
         } => deploy_command(&api, &target, name.as_deref(), retry, cli.json).await?,
-        Command::Apply => output(api.json(Method::POST, "/api/apply").await?, cli.json)?,
+        Command::Apply { dry_run } => {
+            let (method, path) = if dry_run {
+                (Method::GET, "/api/apply/plan")
+            } else {
+                (Method::POST, "/api/apply")
+            };
+            output(api.json(method, path).await?, cli.json)?
+        }
+        Command::Plugin { command } => match command.unwrap_or(PluginCommand::List) {
+            PluginCommand::List => output(api.json(Method::GET, "/api/plugins").await?, cli.json)?,
+            PluginCommand::Describe { instance } => output(
+                api.json(Method::GET, &format!("/api/plugins/{instance}"))
+                    .await?,
+                cli.json,
+            )?,
+            PluginCommand::Library => output(
+                api.json(Method::GET, "/api/plugins/library").await?,
+                cli.json,
+            )?,
+        },
         Command::Run { service } => output(
             api.json(Method::POST, &format!("/api/jobs/{service}/run"))
                 .await?,
