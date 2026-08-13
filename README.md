@@ -158,7 +158,8 @@ services:
 Reusable integrations can be declared as version-pinned, data-only plugins. The
 built-in standard library starts with `supabase-selfhost`; local directories and
 immutable Git commit sources are also supported. Plugins resolve to ordinary
-services without install-time extension code. See
+services without install-time extension code. A plugin may also materialize one
+commit-pinned upstream application repository into a missing or empty directory. See
 [Declarative plugins](docs/plugins.md).
 
 ### Docker

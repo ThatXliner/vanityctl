@@ -266,7 +266,12 @@ fn validate_compose(name: &str, service: &Service) -> Result<()> {
 
     let directory = expand_path(directory)?;
     if !directory.exists() {
-        if service.source.is_none() {
+        if service.source.is_none()
+            && !service
+                .generated_by
+                .as_ref()
+                .is_some_and(|plugin| plugin.materializes_source)
+        {
             bail!(
                 "service {name}: compose directory {} does not exist",
                 directory.display()

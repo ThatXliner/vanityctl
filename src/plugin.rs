@@ -39,6 +39,17 @@ pub struct PluginResolution {
     pub description: Option<String>,
     pub upgrade_guidance: Option<String>,
     pub removal_guidance: Option<String>,
+    pub application: Option<PluginApplication>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginApplication {
+    pub repo: String,
+    pub revision: String,
+    #[serde(default)]
+    pub subdirectory: Option<String>,
+    pub directory: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,6 +69,17 @@ struct PluginManifest {
     upgrade_guidance: Option<String>,
     #[serde(default)]
     removal_guidance: Option<String>,
+    #[serde(default)]
+    application: Option<ApplicationTemplate>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ApplicationTemplate {
+    repo: String,
+    revision: String,
+    #[serde(default)]
+    subdirectory: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +138,7 @@ pub fn resolve_plugins(config: &mut HostConfig, paths: &ConfigPaths) -> Result<(
         validate_manifest(alias, definition, &manifest)?;
         let inputs = resolve_inputs(&instance, &manifest, &declaration.config)?;
         validate_secrets(&instance, &manifest, &declaration.secrets)?;
+        let application = resolve_application(&instance, &declaration, &manifest)?;
 
         config.services.remove(&instance);
         let mut generated_names = Vec::new();
@@ -138,6 +161,7 @@ pub fn resolve_plugins(config: &mut HostConfig, paths: &ConfigPaths) -> Result<(
                 directory: declaration.directory.as_deref(),
                 config: &inputs,
                 secrets: &declaration.secrets,
+                application: application.as_ref(),
             };
             let rendered = render_value(template, &context)?;
             let mut service: Service = serde_yaml::from_value(rendered).with_context(|| {
@@ -152,6 +176,7 @@ pub fn resolve_plugins(config: &mut HostConfig, paths: &ConfigPaths) -> Result<(
                 version: manifest.version.clone(),
                 source: source_label.clone(),
                 revision: definition.revision.clone(),
+                materializes_source: application.is_some(),
             });
             service.enabled = declaration.enabled && service.enabled;
             config.services.insert(generated_name.clone(), service);
@@ -173,6 +198,7 @@ pub fn resolve_plugins(config: &mut HostConfig, paths: &ConfigPaths) -> Result<(
                 description: manifest.description,
                 upgrade_guidance: manifest.upgrade_guidance,
                 removal_guidance: manifest.removal_guidance,
+                application,
             },
         );
     }
@@ -412,6 +438,7 @@ struct TemplateContext<'a> {
     directory: Option<&'a str>,
     config: &'a BTreeMap<String, Value>,
     secrets: &'a BTreeMap<String, String>,
+    application: Option<&'a PluginApplication>,
 }
 
 fn render_value(value: &Value, context: &TemplateContext<'_>) -> Result<Value> {
@@ -468,6 +495,14 @@ fn lookup_token(token: &str, context: &TemplateContext<'_>) -> Result<Value> {
                 .directory
                 .context("plugin instance requires directory")?
                 .into(),
+        )),
+        "instance.application_directory" => Ok(Value::String(
+            context
+                .application
+                .map(application_directory)
+                .context("plugin template requires an application source")?
+                .display()
+                .to_string(),
         )),
         _ if token.starts_with("config.") => context
             .config
@@ -537,6 +572,55 @@ fn valid_name(value: &str) -> bool {
 
 fn is_commit_pin(value: &str) -> bool {
     value.len() == 40 && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn resolve_application(
+    instance: &str,
+    declaration: &Service,
+    manifest: &PluginManifest,
+) -> Result<Option<PluginApplication>> {
+    let Some(source) = &manifest.application else {
+        return Ok(None);
+    };
+    if !is_commit_pin(&source.revision) {
+        bail!(
+            "plugin service {instance}: application revision must be a full 40-character commit SHA"
+        );
+    }
+    let directory = declaration.directory.clone().with_context(|| {
+        format!("plugin service {instance}: application source requires directory")
+    })?;
+    if let Some(subdirectory) = &source.subdirectory {
+        validate_relative_subdirectory(instance, subdirectory)?;
+    }
+    Ok(Some(PluginApplication {
+        repo: source.repo.clone(),
+        revision: source.revision.clone(),
+        subdirectory: source.subdirectory.clone(),
+        directory,
+    }))
+}
+
+fn validate_relative_subdirectory(instance: &str, value: &str) -> Result<()> {
+    let path = Path::new(value);
+    if value.is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        bail!("plugin service {instance}: application subdirectory must be a safe relative path");
+    }
+    Ok(())
+}
+
+pub fn application_directory(application: &PluginApplication) -> std::path::PathBuf {
+    let root = expand_path(&application.directory)
+        .expect("plugin application directory was validated during resolution");
+    application
+        .subdirectory
+        .as_deref()
+        .map_or(root.clone(), |subdirectory| root.join(subdirectory))
 }
 
 pub fn stdlib_catalog() -> Vec<Value> {

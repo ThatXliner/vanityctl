@@ -33,7 +33,11 @@ config.yaml + services/*.yaml
 - Secrets are references (`env_file`, `token_env`), never returned by the API.
 - Plugin manifests are declarative data, version-pinned, and expand before backend
   dispatch. Secret templates are restricted to `env_file`; plugins cannot run
-  privileged extension code or create resources outside their generated names.
+  privileged extension code or create resources outside their generated names and
+  explicitly declared application directory.
+- A plugin application source is cloned at an exact commit through a temporary
+  sibling and installed only into a missing or empty owned directory. Reconciliation
+  verifies its origin and commit; removal never deletes the checkout or its data.
 - The API binds to `127.0.0.1` by default and refuses a non-loopback listener unless
   an API token environment variable is configured.
 

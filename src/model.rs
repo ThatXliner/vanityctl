@@ -22,6 +22,7 @@ pub struct GeneratedByPlugin {
     pub source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
+    pub materializes_source: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

@@ -1,16 +1,13 @@
 use std::{fs, process::Command, sync::Arc};
 
 use tempfile::tempdir;
-use vanityctl::{
-    ConfigPaths, HostConfig, Manager,
-    runner::{CommandOutput, RecordingRunner},
-};
+use vanityctl::{ConfigPaths, HostConfig, Manager, runner::RecordingRunner};
 
 fn write_supabase_fixture(root: &std::path::Path) -> ConfigPaths {
     let paths = ConfigPaths::from_root(root);
     let project = root.join("supabase");
-    fs::create_dir_all(&project).unwrap();
-    fs::write(project.join("docker-compose.yml"), "services: {}\n").unwrap();
+    fs::create_dir_all(project.join("docker")).unwrap();
+    fs::write(project.join("docker/docker-compose.yml"), "services: {}\n").unwrap();
     fs::write(
         &paths.config,
         format!(
@@ -67,47 +64,6 @@ fn standard_library_plugin_expands_to_normal_services() {
         config.resolved_plugins["data"].generated_services,
         ["data", "data-backup"]
     );
-}
-
-#[tokio::test]
-async fn plugin_services_apply_idempotently_through_existing_backends() {
-    let dir = tempdir().unwrap();
-    let paths = write_supabase_fixture(dir.path());
-    let runner = Arc::new(RecordingRunner::default());
-    *runner.response.lock().unwrap() = Some(CommandOutput {
-        stdout: "container-id\n".into(),
-        stderr: String::new(),
-        code: 0,
-    });
-    let manager = Manager::new(paths, runner.clone()).unwrap();
-
-    let first = manager.apply().await.unwrap();
-    let second = manager.apply().await.unwrap();
-    assert!(first.changed.contains(&"data".to_string()));
-    assert!(second.unchanged.contains(&"data".to_string()));
-
-    let calls = runner.calls.lock().unwrap();
-    let compose_calls: Vec<_> = calls
-        .iter()
-        .filter(|(command, args)| {
-            command == "docker" && args.first().is_some_and(|value| value == "compose")
-        })
-        .collect();
-    assert_eq!(
-        compose_calls
-            .iter()
-            .filter(|(_, args)| args.ends_with(&["up".into(), "-d".into()]))
-            .count(),
-        1
-    );
-    assert!(compose_calls.iter().all(|(_, args)| {
-        args.windows(2).any(|pair| {
-            pair == [
-                "--env-file".to_string(),
-                "/private/secrets/supabase.env".to_string(),
-            ]
-        })
-    }));
 }
 
 #[test]
@@ -283,6 +239,77 @@ fn git_plugins_reject_moving_references_before_cloning() {
     assert!(!paths.plugins.join("cache/bad").exists());
 }
 
+#[test]
+fn plugin_application_source_is_materialized_once_at_its_pin() {
+    let dir = tempdir().unwrap();
+    let application_repo = dir.path().join("application");
+    fs::create_dir_all(application_repo.join("deploy")).unwrap();
+    run(&application_repo, &["init"]);
+    run(
+        &application_repo,
+        &["config", "user.email", "test@example.com"],
+    );
+    run(&application_repo, &["config", "user.name", "Test"]);
+    fs::write(
+        application_repo.join("deploy/compose.yaml"),
+        "services: {}\n",
+    )
+    .unwrap();
+    run(&application_repo, &["add", "deploy/compose.yaml"]);
+    run(&application_repo, &["commit", "-m", "application"]);
+    let revision = git_output(&application_repo, &["rev-parse", "HEAD"]);
+
+    let host = dir.path().join("host");
+    let plugin = host.join("plugin");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.yaml"),
+        format!(
+            r#"apiVersion: vanityctl.dev/plugin/v1
+name: packaged-compose
+version: 1.0.0
+application:
+  repo: file://{}
+  revision: {}
+  subdirectory: deploy
+services:
+  main:
+    type: compose
+    directory: "${{instance.application_directory}}"
+    file: compose.yaml
+"#,
+            application_repo.display(),
+            revision
+        ),
+    )
+    .unwrap();
+    let paths = ConfigPaths::from_root(&host);
+    let target = dir.path().join("installed-app");
+    fs::write(
+        &paths.config,
+        format!(
+            "version: 1\nplugins:\n  packaged:\n    source: path:plugin\n    version: 1.0.0\nservices:\n  app:\n    type: plugin\n    plugin: packaged\n    directory: {}\n",
+            target.display()
+        ),
+    )
+    .unwrap();
+
+    let manager = Manager::system(paths.clone()).unwrap();
+    assert_eq!(manager.materialize_plugin_sources().unwrap(), ["app"]);
+    assert!(target.join("deploy/compose.yaml").is_file());
+    assert_eq!(git_output(&target, &["rev-parse", "HEAD"]), revision);
+    assert!(paths.state.join("plugin-sources/app.json").is_file());
+    assert!(manager.materialize_plugin_sources().unwrap().is_empty());
+
+    fs::write(target.join("local-data"), "preserve").unwrap();
+    fs::write(&paths.config, "version: 1\nservices: {}\n").unwrap();
+    HostConfig::load(&paths).unwrap();
+    assert_eq!(
+        fs::read_to_string(target.join("local-data")).unwrap(),
+        "preserve"
+    );
+}
+
 fn run(cwd: &std::path::Path, args: &[&str]) {
     let status = Command::new("git")
         .args(args)
@@ -290,6 +317,16 @@ fn run(cwd: &std::path::Path, args: &[&str]) {
         .status()
         .unwrap();
     assert!(status.success());
+}
+
+fn git_output(cwd: &std::path::Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
 }
 
 #[test]

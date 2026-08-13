@@ -44,7 +44,9 @@ The same complete example is available at
 [`examples/plugins/supabase.yaml`](../examples/plugins/supabase.yaml).
 
 This resolves to the Compose service `sweepr-supabase` and scheduled job
-`sweepr-supabase-backup`. The backup uses `pg_dumpall`; stdout is retained in the
+`sweepr-supabase-backup`. On the first apply, vanityctl clones the pinned upstream
+Supabase repository into `directory`; both generated services operate from its
+`docker` subdirectory. The backup uses `pg_dumpall`; stdout is retained in the
 normal vanityctl job log. Treat that as a logical backup stream and export/rotate it
 according to your retention needs. Restoring remains an explicit operator action in
 this first plugin version because selecting and applying a database dump is
@@ -93,6 +95,34 @@ Pinned Git plugins are checked out under `plugins/cache/<alias>/<commit>` inside
 configuration root. A cached checkout is verified on every load. Changing `version`
 is an explicit upgrade; vanityctl never follows a moving branch or silently updates
 a plugin.
+
+## Packaged application sources
+
+A plugin may contain one pinned application source:
+
+```yaml
+application:
+  repo: https://github.com/example/application.git
+  revision: 0123456789abcdef0123456789abcdef01234567
+  subdirectory: deploy
+
+services:
+  main:
+    type: compose
+    directory: "${instance.application_directory}"
+    file: compose.yaml
+```
+
+`revision` must be a full commit SHA and `subdirectory` must be a safe relative
+path. On apply, vanityctl clones to a temporary sibling, verifies the exact commit,
+origin, and subdirectory, then atomically installs it at the instance `directory`.
+It only installs into a missing or empty directory. An ownership record lives under
+`state/plugin-sources`; a non-empty unowned directory or mismatched pin fails loudly
+and is never overwritten. Subsequent applies verify the checkout and do no work.
+
+This intentionally does not provide an asset copier or installer hooks yet. A
+plugin can bring the pinned upstream repository and select a directory inside it;
+private env files and persistent data remain user-owned outside the package.
 
 ## Authoring a plugin
 
