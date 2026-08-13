@@ -8,6 +8,8 @@ are API clients.
 ```text
 config.yaml + services/*.yaml
              |
+    plugin validation/expansion
+             |
            hostd
     +--------+---------+----------+-------------+
     |        |         |          |             |
@@ -29,6 +31,9 @@ config.yaml + services/*.yaml
   `dev.vanityctl.service=<name>`.
 - Persistent volumes and source directories are never deleted by `apply`.
 - Secrets are references (`env_file`, `token_env`), never returned by the API.
+- Plugin manifests are declarative data, version-pinned, and expand before backend
+  dispatch. Secret templates are restricted to `env_file`; plugins cannot run
+  privileged extension code or create resources outside their generated names.
 - The API binds to `127.0.0.1` by default and refuses a non-loopback listener unless
   an API token environment variable is configured.
 

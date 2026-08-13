@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{DeployTrigger, DnsConfig, Service, ServiceType};
+use crate::plugin::{PluginDefinition, PluginResolution, resolve_plugins};
 
 #[derive(Debug, Clone)]
 pub struct ConfigPaths {
@@ -17,6 +18,7 @@ pub struct ConfigPaths {
     pub state: PathBuf,
     pub logs: PathBuf,
     pub generated: PathBuf,
+    pub plugins: PathBuf,
 }
 
 impl ConfigPaths {
@@ -50,12 +52,13 @@ impl ConfigPaths {
             state: root.join("state"),
             logs: root.join("logs"),
             generated: root.join("generated"),
+            plugins: root.join("plugins"),
             root,
         }
     }
 
     pub fn ensure_runtime_dirs(&self) -> Result<()> {
-        for path in [&self.state, &self.logs, &self.generated] {
+        for path in [&self.state, &self.logs, &self.generated, &self.plugins] {
             fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
         }
         Ok(())
@@ -94,6 +97,10 @@ pub struct HostConfig {
     pub services: BTreeMap<String, Service>,
     #[serde(default)]
     pub dns: Option<DnsConfig>,
+    #[serde(default)]
+    pub plugins: BTreeMap<String, PluginDefinition>,
+    #[serde(skip)]
+    pub resolved_plugins: BTreeMap<String, PluginResolution>,
 }
 
 fn default_version() -> u32 {
@@ -128,6 +135,7 @@ impl HostConfig {
                 }
             }
         }
+        resolve_plugins(&mut config, paths)?;
         config.validate()?;
         Ok(config)
     }
@@ -158,6 +166,9 @@ impl HostConfig {
                 ServiceType::Process | ServiceType::Job if svc.command.is_none() => {
                     bail!("service {name}: {:?} requires command", svc.kind)
                 }
+                ServiceType::Plugin => {
+                    bail!("service {name}: unresolved plugin declaration; check its plugin source")
+                }
                 _ => {}
             }
             if svc.kind == ServiceType::Job && svc.schedule.is_none() {
@@ -172,6 +183,11 @@ impl HostConfig {
             }
             if svc.kind != ServiceType::Compose && (svc.file.is_some() || svc.files.is_some()) {
                 bail!("service {name}: file and files are only valid for compose services");
+            }
+            if svc.plugin.is_some() || !svc.config.is_empty() || !svc.secrets.is_empty() {
+                bail!(
+                    "service {name}: plugin, config, and secrets are only valid on type: plugin declarations"
+                );
             }
             if let Some(source) = &svc.source
                 && source.kind != "git"

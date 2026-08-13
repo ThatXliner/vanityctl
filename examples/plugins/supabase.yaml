@@ -1,0 +1,18 @@
+version: 1
+
+plugins:
+  supabase:
+    source: stdlib:supabase-selfhost
+    version: 1.0.0
+
+services:
+  sweepr-supabase:
+    type: plugin
+    plugin: supabase
+    directory: ~/services/sweepr-supabase
+    config:
+      compose_file: docker-compose.yml
+      database_service: db
+      backup_schedule: "0 2 * * *"
+    secrets:
+      env_file: ~/.config/sweepr/supabase.env

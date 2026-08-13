@@ -11,6 +11,7 @@ use crate::{
     deploy::DeployCoordinator,
     dns::{DnsReconciler, DnsStatus},
     model::{DeploymentRecord, Event, JobRun, RuntimeState, Service, ServiceStatus, ServiceType},
+    plugin::{PluginResolution, stdlib_catalog},
     runner::{SharedRunner, SystemRunner},
     state::StateStore,
 };
@@ -30,6 +31,15 @@ pub struct ApplyResult {
     pub changed: Vec<String>,
     pub unchanged: Vec<String>,
     pub errors: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyPlan {
+    pub services: Vec<String>,
+    pub plugins: Vec<PluginResolution>,
+    pub actions: Vec<String>,
+    pub note: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -174,6 +184,35 @@ impl Manager {
         Ok(result)
     }
 
+    pub fn apply_plan(&self) -> Result<ApplyPlan> {
+        let config = self.config()?;
+        Ok(ApplyPlan {
+            services: config.services.keys().cloned().collect(),
+            plugins: config.resolved_plugins.values().cloned().collect(),
+            actions: config
+                .services
+                .iter()
+                .map(|(name, service)| format!("reconcile {name} ({:?})", service.kind))
+                .collect(),
+            note: "dry run only; no service, scheduler, Docker, or launchd changes were made",
+        })
+    }
+
+    pub fn plugins(&self) -> Result<Vec<PluginResolution>> {
+        Ok(self.config()?.resolved_plugins.into_values().collect())
+    }
+
+    pub fn plugin(&self, name: &str) -> Result<PluginResolution> {
+        self.config()?
+            .resolved_plugins
+            .remove(name)
+            .with_context(|| format!("unknown plugin instance {name:?}"))
+    }
+
+    pub fn plugin_library(&self) -> Value {
+        json!(stdlib_catalog())
+    }
+
     fn ensure_source(&self, service: &Service) -> Result<()> {
         let Some(source) = &service.source else {
             return Ok(());
@@ -281,6 +320,7 @@ impl Manager {
                 json!(service.environment.keys().collect::<Vec<_>>()),
             );
             if service.env_file.is_some() {
+                object.remove("env_file");
                 object.insert("envFile".into(), json!("configured (value hidden)"));
             }
             if service.kind == ServiceType::Compose {

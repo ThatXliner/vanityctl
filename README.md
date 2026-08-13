@@ -128,13 +128,14 @@ The default root is `~/.vanityctl`:
 ~/.vanityctl/
 ├── config.yaml             # main desired state; safe to version-control
 ├── services/               # optional service fragments; safe to version-control
+├── plugins/cache/          # pinned third-party plugin checkouts; do not edit
 ├── generated/              # owned launchd artifacts
 ├── logs/                   # service, job, and deployment logs
 └── state/state.json        # observations and bounded history
 ```
 
 Set `VANITYCTL_CONFIG=/path/to/infra/config.yaml` to use a checked-out infrastructure
-repository elsewhere. Add `state/`, `logs/`, and `generated/` to that repository's
+repository elsewhere. Add `state/`, `logs/`, `generated/`, and `plugins/cache/` to that repository's
 `.gitignore`. The main file and every fragment use strict parsing: misspelled or
 unknown fields fail validation instead of being ignored.
 
@@ -153,6 +154,12 @@ services:
       EULA: "TRUE"
     restart: always
 ```
+
+Reusable integrations can be declared as version-pinned, data-only plugins. The
+built-in standard library starts with `supabase-selfhost`; local directories and
+immutable Git commit sources are also supported. Plugins resolve to ordinary
+services without install-time extension code. See
+[Declarative plugins](docs/plugins.md).
 
 ### Docker
 
@@ -345,6 +352,9 @@ vanityctl start|stop|restart SERVICE
 vanityctl pull|build SERVICE              (Compose services)
 vanityctl logs SERVICE [-f] [--lines N]
 vanityctl apply
+vanityctl apply --dry-run
+vanityctl plugin [list|library]
+vanityctl plugin describe INSTANCE
 vanityctl deploy SERVICE [--retry]
 vanityctl deploy history|logs SERVICE
 vanityctl deploy auto-enable|auto-disable SERVICE

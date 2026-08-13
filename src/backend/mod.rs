@@ -55,6 +55,9 @@ impl BackendSet {
             ServiceType::Docker => &self.docker,
             ServiceType::Compose => &self.compose,
             ServiceType::Process | ServiceType::Job => &self.launchd,
+            ServiceType::Plugin => {
+                unreachable!("plugin declarations are resolved before backend dispatch")
+            }
         }
     }
 }
@@ -320,6 +323,12 @@ impl ComposeBackend {
                 .context("compose directory missing")?,
         )?;
         let mut args = vec!["compose".into()];
+        if let Some(file) = &service.env_file {
+            args.extend([
+                "--env-file".into(),
+                expand_path(file)?.display().to_string(),
+            ]);
+        }
         let mut resolved = HashSet::new();
         for file in files {
             let path = resolve_compose_file(&cwd, file)?;
