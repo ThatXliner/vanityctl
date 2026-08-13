@@ -41,6 +41,14 @@ enum Command {
     Restart {
         service: String,
     },
+    /// Pull images for a Compose service.
+    Pull {
+        service: String,
+    },
+    /// Build images for a Compose service.
+    Build {
+        service: String,
+    },
     Logs {
         service: String,
         #[arg(short = 'f', long)]
@@ -186,6 +194,8 @@ async fn main() -> Result<()> {
         Command::Start { service } => action(&api, &service, "start").await?,
         Command::Stop { service } => action(&api, &service, "stop").await?,
         Command::Restart { service } => action(&api, &service, "restart").await?,
+        Command::Pull { service } => action(&api, &service, "pull").await?,
+        Command::Build { service } => action(&api, &service, "build").await?,
         Command::Logs {
             service,
             follow,

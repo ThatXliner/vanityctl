@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
 };
@@ -9,7 +10,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    config::{ConfigPaths, expand_path},
+    config::{ConfigPaths, expand_path, resolve_compose_file},
     model::{RuntimeState, Service, ServiceStatus, ServiceType},
     runner::SharedRunner,
 };
@@ -22,6 +23,16 @@ pub trait Backend: Send + Sync {
     async fn stop(&self, name: &str, service: &Service) -> Result<()>;
     async fn restart(&self, name: &str, service: &Service) -> Result<()>;
     async fn logs(&self, name: &str, service: &Service, lines: usize) -> Result<String>;
+    async fn pull(&self, _name: &str, _service: &Service) -> Result<()> {
+        bail!("pull is only supported for compose services")
+    }
+    async fn build(&self, _name: &str, _service: &Service) -> Result<()> {
+        bail!("build is only supported for compose services")
+    }
+    async fn deploy(&self, name: &str, service: &Service) -> Result<()> {
+        self.apply(name, service).await?;
+        Ok(())
+    }
 }
 
 pub struct BackendSet {
@@ -34,7 +45,7 @@ impl BackendSet {
     pub fn new(runner: SharedRunner, paths: ConfigPaths) -> Self {
         Self {
             docker: DockerBackend::new(runner.clone()),
-            compose: ComposeBackend::new(runner.clone()),
+            compose: ComposeBackend::new(runner.clone(), paths.clone()),
             launchd: LaunchdBackend::new(runner, paths),
         }
     }
@@ -288,12 +299,20 @@ impl Backend for DockerBackend {
 
 pub struct ComposeBackend {
     runner: SharedRunner,
+    paths: ConfigPaths,
 }
 impl ComposeBackend {
-    pub fn new(runner: SharedRunner) -> Self {
-        Self { runner }
+    pub fn new(runner: SharedRunner, paths: ConfigPaths) -> Self {
+        Self { runner, paths }
     }
     fn base(service: &Service) -> Result<(Vec<String>, PathBuf)> {
+        if service.file.is_some() && service.files.is_some() {
+            bail!("compose accepts either legacy file or files, not both");
+        }
+        let files = service.compose_files();
+        if files.is_empty() {
+            bail!("compose requires a non-empty files list");
+        }
         let cwd = expand_path(
             service
                 .directory
@@ -301,10 +320,98 @@ impl ComposeBackend {
                 .context("compose directory missing")?,
         )?;
         let mut args = vec!["compose".into()];
-        if let Some(file) = &service.file {
-            args.extend(["-f".into(), file.clone()]);
+        let mut resolved = HashSet::new();
+        for file in files {
+            let path = resolve_compose_file(&cwd, file)?;
+            if !resolved.insert(path.clone()) {
+                bail!("compose file {} is listed more than once", path.display());
+            }
+            fs::File::open(&path)
+                .with_context(|| format!("compose file {} is not readable", path.display()))?;
+            args.extend(["-f".into(), path.display().to_string()]);
         }
         Ok((args, cwd))
+    }
+
+    fn marker(&self, name: &str) -> PathBuf {
+        self.paths
+            .state
+            .join("compose")
+            .join(format!("{name}.sha256"))
+    }
+
+    fn fingerprint(service: &Service, cwd: &Path) -> Result<String> {
+        let mut hash = Sha256::new();
+        hash.update(serde_json::to_vec(service)?);
+        for file in service.compose_files() {
+            let path = resolve_compose_file(cwd, file)?;
+            hash.update(path.to_string_lossy().as_bytes());
+            hash.update(fs::read(&path).with_context(|| {
+                format!("read compose file {} for reconciliation", path.display())
+            })?);
+        }
+        Ok(format!("{:x}", hash.finalize()))
+    }
+
+    fn write_marker(&self, name: &str, fingerprint: &str) -> Result<()> {
+        let marker = self.marker(name);
+        fs::create_dir_all(
+            marker
+                .parent()
+                .context("compose state path has no parent")?,
+        )?;
+        let temporary = marker.with_extension("sha256.tmp");
+        fs::write(&temporary, fingerprint)?;
+        fs::rename(temporary, marker)?;
+        Ok(())
+    }
+
+    fn invalidate_marker(&self, name: &str) -> Result<()> {
+        match fs::remove_file(self.marker(name)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn run_operation(&self, service: &Service, operation: &str) -> Result<()> {
+        let (mut args, cwd) = Self::base(service)?;
+        args.push(operation.into());
+        self.runner.run("docker", &args, Some(&cwd))?;
+        Ok(())
+    }
+
+    fn reconcile(&self, name: &str, service: &Service, force: bool) -> Result<bool> {
+        let (mut args, cwd) = Self::base(service)?;
+        let fingerprint = Self::fingerprint(service, &cwd)?;
+        if !force
+            && fs::read_to_string(self.marker(name)).is_ok_and(|current| current == fingerprint)
+        {
+            let mut status_args = args.clone();
+            status_args.extend([
+                "ps".into(),
+                "--status".into(),
+                "running".into(),
+                "--quiet".into(),
+            ]);
+            let running = !self
+                .runner
+                .run("docker", &status_args, Some(&cwd))?
+                .stdout
+                .trim()
+                .is_empty();
+            if running == service.enabled {
+                return Ok(false);
+            }
+        }
+        args.extend(if service.enabled {
+            vec!["up".into(), "-d".into()]
+        } else {
+            vec!["stop".into()]
+        });
+        self.runner.run("docker", &args, Some(&cwd))?;
+        self.write_marker(name, &fingerprint)?;
+        Ok(true)
     }
 }
 
@@ -325,15 +432,8 @@ impl Backend for ComposeBackend {
             _ => Ok(base_status(name, service, RuntimeState::Stopped)),
         }
     }
-    async fn apply(&self, _name: &str, service: &Service) -> Result<bool> {
-        let (mut args, cwd) = Self::base(service)?;
-        args.extend(if service.enabled {
-            vec!["up".into(), "-d".into()]
-        } else {
-            vec!["stop".into()]
-        });
-        self.runner.run("docker", &args, Some(&cwd))?;
-        Ok(true)
+    async fn apply(&self, name: &str, service: &Service) -> Result<bool> {
+        self.reconcile(name, service, false)
     }
     async fn start(&self, _name: &str, service: &Service) -> Result<()> {
         let (mut args, cwd) = Self::base(service)?;
@@ -357,6 +457,20 @@ impl Backend for ComposeBackend {
         let (mut args, cwd) = Self::base(service)?;
         args.extend(["logs".into(), "--tail".into(), lines.to_string()]);
         Ok(self.runner.run("docker", &args, Some(&cwd))?.stdout)
+    }
+    async fn pull(&self, name: &str, service: &Service) -> Result<()> {
+        self.run_operation(service, "pull")?;
+        self.invalidate_marker(name)
+    }
+    async fn build(&self, name: &str, service: &Service) -> Result<()> {
+        self.run_operation(service, "build")?;
+        self.invalidate_marker(name)
+    }
+    async fn deploy(&self, name: &str, service: &Service) -> Result<()> {
+        self.run_operation(service, "pull")?;
+        self.run_operation(service, "build")?;
+        self.reconcile(name, service, true)?;
+        Ok(())
     }
 }
 

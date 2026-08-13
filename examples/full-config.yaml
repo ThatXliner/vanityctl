@@ -18,6 +18,14 @@ dns:
       value: public_ip
 
 services:
+  immich:
+    type: compose
+    description: Compose project with a production override
+    directory: ~/services/immich
+    files:
+      - compose.yaml
+      - compose.production.yaml
+
   billion:
     type: docker
     description: Git-backed web application
