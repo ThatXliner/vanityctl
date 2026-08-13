@@ -30,7 +30,7 @@ config.yaml + services/*.yaml
 - Docker resources are labeled `dev.vanityctl.managed=true` and
   `dev.vanityctl.service=<name>`.
 - Persistent volumes and source directories are never deleted by `apply`.
-- Secrets are references (`env_file`, `token_env`), never returned by the API.
+- Secrets are references (`env_file`, `token_env`, `token_file`), never returned by the API.
 - Plugin manifests are declarative data, version-pinned, and expand before backend
   dispatch. Secret templates are restricted to `env_file`; plugins cannot run
   privileged extension code or create resources outside their generated names and
@@ -39,7 +39,9 @@ config.yaml + services/*.yaml
   sibling and installed only into a missing or empty owned directory. Reconciliation
   verifies its origin and commit; removal never deletes the checkout or its data.
 - The API binds to `127.0.0.1` by default and refuses a non-loopback listener unless
-  an API token environment variable is configured.
+  an API token environment variable or token file is configured. Optional public
+  read-only mode uses a strict route allowlist; writes, logs, configuration, and
+  agent context always remain authenticated.
 
 ## V0 boundary
 

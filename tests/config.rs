@@ -45,6 +45,45 @@ fn rejects_public_unauthenticated_listener() {
 }
 
 #[test]
+fn public_read_only_requires_a_token_for_mutating_routes() {
+    let dir = tempdir().unwrap();
+    let paths = ConfigPaths::from_root(dir.path());
+    fs::write(
+        &paths.config,
+        "version: 1\napi:\n  public_read_only: true\nservices: {}\n",
+    )
+    .unwrap();
+    assert!(
+        HostConfig::load(&paths)
+            .unwrap_err()
+            .to_string()
+            .contains("requires api.token_env or api.token_file")
+    );
+}
+
+#[test]
+fn resolves_token_file_for_public_read_only_mode() {
+    let dir = tempdir().unwrap();
+    let paths = ConfigPaths::from_root(dir.path());
+    let token = dir.path().join("api-token");
+    fs::write(&token, "secret-token\n").unwrap();
+    fs::write(
+        &paths.config,
+        format!(
+            "version: 1\napi:\n  token_file: {}\n  public_read_only: true\nservices: {{}}\n",
+            token.display()
+        ),
+    )
+    .unwrap();
+    let config = HostConfig::load(&paths).unwrap();
+    assert!(config.api.public_read_only);
+    assert_eq!(
+        config.api.resolve_token().unwrap().as_deref(),
+        Some("secret-token")
+    );
+}
+
+#[test]
 fn accepts_legacy_and_ordered_compose_files() {
     let dir = tempdir().unwrap();
     let paths = ConfigPaths::from_root(dir.path());
