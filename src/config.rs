@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{DeployTrigger, DnsConfig, Service, ServiceType};
+use crate::plugin::{PluginDefinition, PluginResolution, resolve_plugins};
 
 #[derive(Debug, Clone)]
 pub struct ConfigPaths {
@@ -17,6 +18,7 @@ pub struct ConfigPaths {
     pub state: PathBuf,
     pub logs: PathBuf,
     pub generated: PathBuf,
+    pub plugins: PathBuf,
 }
 
 impl ConfigPaths {
@@ -50,12 +52,13 @@ impl ConfigPaths {
             state: root.join("state"),
             logs: root.join("logs"),
             generated: root.join("generated"),
+            plugins: root.join("plugins"),
             root,
         }
     }
 
     pub fn ensure_runtime_dirs(&self) -> Result<()> {
-        for path in [&self.state, &self.logs, &self.generated] {
+        for path in [&self.state, &self.logs, &self.generated, &self.plugins] {
             fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
         }
         Ok(())
@@ -69,6 +72,11 @@ pub struct ApiConfig {
     pub listen: String,
     #[serde(default)]
     pub token_env: Option<String>,
+    #[serde(default)]
+    pub token_file: Option<String>,
+    /// Expose only explicitly allowlisted, non-mutating API routes without a token.
+    #[serde(default)]
+    pub public_read_only: bool,
 }
 
 fn default_listen() -> String {
@@ -79,7 +87,33 @@ impl Default for ApiConfig {
         Self {
             listen: default_listen(),
             token_env: None,
+            token_file: None,
+            public_read_only: false,
         }
+    }
+}
+
+impl ApiConfig {
+    pub fn resolve_token(&self) -> Result<Option<String>> {
+        let token = match (&self.token_env, &self.token_file) {
+            (Some(_), Some(_)) => bail!("api may set either token_env or token_file, not both"),
+            (Some(name), None) => Some(
+                env::var(name)
+                    .with_context(|| format!("read API token from environment variable {name}"))?,
+            ),
+            (None, Some(path)) => Some(
+                fs::read_to_string(expand_path(path)?)
+                    .with_context(|| format!("read API token file {path}"))?,
+            ),
+            (None, None) => None,
+        };
+        Ok(token
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()))
+    }
+
+    fn has_token_source(&self) -> bool {
+        self.token_env.is_some() || self.token_file.is_some()
     }
 }
 
@@ -94,6 +128,10 @@ pub struct HostConfig {
     pub services: BTreeMap<String, Service>,
     #[serde(default)]
     pub dns: Option<DnsConfig>,
+    #[serde(default)]
+    pub plugins: BTreeMap<String, PluginDefinition>,
+    #[serde(skip)]
+    pub resolved_plugins: BTreeMap<String, PluginResolution>,
 }
 
 fn default_version() -> u32 {
@@ -128,6 +166,7 @@ impl HostConfig {
                 }
             }
         }
+        resolve_plugins(&mut config, paths)?;
         config.validate()?;
         Ok(config)
     }
@@ -138,9 +177,17 @@ impl HostConfig {
         }
         if !self.api.listen.starts_with("127.0.0.1:")
             && !self.api.listen.starts_with("[::1]:")
-            && self.api.token_env.is_none()
+            && !self.api.has_token_source()
         {
-            bail!("non-loopback api.listen requires api.token_env");
+            bail!("non-loopback api.listen requires api.token_env or api.token_file");
+        }
+        if self.api.token_env.is_some() && self.api.token_file.is_some() {
+            bail!("api may set either token_env or token_file, not both");
+        }
+        if self.api.public_read_only && !self.api.has_token_source() {
+            bail!(
+                "api.public_read_only requires api.token_env or api.token_file so mutating routes remain protected"
+            );
         }
         for (name, svc) in &self.services {
             if name.is_empty()
@@ -154,11 +201,12 @@ impl HostConfig {
                 ServiceType::Docker if svc.image.is_none() && svc.build.is_none() => {
                     bail!("service {name}: docker requires image or build")
                 }
-                ServiceType::Compose if svc.directory.is_none() => {
-                    bail!("service {name}: compose requires directory")
-                }
+                ServiceType::Compose => validate_compose(name, svc)?,
                 ServiceType::Process | ServiceType::Job if svc.command.is_none() => {
                     bail!("service {name}: {:?} requires command", svc.kind)
+                }
+                ServiceType::Plugin => {
+                    bail!("service {name}: unresolved plugin declaration; check its plugin source")
                 }
                 _ => {}
             }
@@ -171,6 +219,14 @@ impl HostConfig {
             }
             if svc.kind != ServiceType::Job && svc.schedule.is_some() {
                 bail!("service {name}: schedule is only valid for jobs");
+            }
+            if svc.kind != ServiceType::Compose && (svc.file.is_some() || svc.files.is_some()) {
+                bail!("service {name}: file and files are only valid for compose services");
+            }
+            if svc.plugin.is_some() || !svc.config.is_empty() || !svc.secrets.is_empty() {
+                bail!(
+                    "service {name}: plugin, config, and secrets are only valid on type: plugin declarations"
+                );
             }
             if let Some(source) = &svc.source
                 && source.kind != "git"
@@ -221,6 +277,84 @@ impl HostConfig {
         }
         Ok(())
     }
+}
+
+fn validate_compose(name: &str, service: &Service) -> Result<()> {
+    let directory = service
+        .directory
+        .as_deref()
+        .with_context(|| format!("service {name}: compose requires directory"))?;
+    match (&service.file, &service.files) {
+        (Some(_), Some(_)) => bail!(
+            "service {name}: compose accepts either legacy file or files, not both; migrate to files"
+        ),
+        (None, None) => bail!(
+            "service {name}: compose requires a non-empty files list (legacy file is also accepted)"
+        ),
+        (Some(file), None) if file.trim().is_empty() => {
+            bail!("service {name}: compose file cannot be empty")
+        }
+        (None, Some(files)) if files.is_empty() => {
+            bail!("service {name}: compose files must not be empty")
+        }
+        (None, Some(files)) if files.iter().any(|file| file.trim().is_empty()) => {
+            bail!("service {name}: compose files cannot contain an empty path")
+        }
+        _ => {}
+    }
+
+    let directory = expand_path(directory)?;
+    if !directory.exists() {
+        if service.source.is_none()
+            && !service
+                .generated_by
+                .as_ref()
+                .is_some_and(|plugin| plugin.materializes_source)
+        {
+            bail!(
+                "service {name}: compose directory {} does not exist",
+                directory.display()
+            );
+        }
+        return Ok(());
+    }
+    if !directory.is_dir() {
+        bail!(
+            "service {name}: compose directory {} is not a directory",
+            directory.display()
+        );
+    }
+    if service.source.is_some() && !directory.join(".git").exists() {
+        // `apply` will clone into an existing empty directory, then the backend
+        // validates every file before invoking Docker.
+        return Ok(());
+    }
+    let mut files = HashSet::new();
+    for file in service.compose_files() {
+        let path = resolve_compose_file(&directory, file)?;
+        if !files.insert(path.clone()) {
+            bail!(
+                "service {name}: compose file {} is listed more than once",
+                path.display()
+            );
+        }
+        fs::File::open(&path).with_context(|| {
+            format!(
+                "service {name}: compose file {} is not readable",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+pub fn resolve_compose_file(directory: &Path, file: &str) -> Result<PathBuf> {
+    let path = expand_path(file)?;
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        directory.join(path)
+    })
 }
 
 #[derive(Deserialize)]

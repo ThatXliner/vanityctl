@@ -128,13 +128,14 @@ The default root is `~/.vanityctl`:
 ~/.vanityctl/
 ├── config.yaml             # main desired state; safe to version-control
 ├── services/               # optional service fragments; safe to version-control
+├── plugins/cache/          # pinned third-party plugin checkouts; do not edit
 ├── generated/              # owned launchd artifacts
 ├── logs/                   # service, job, and deployment logs
 └── state/state.json        # observations and bounded history
 ```
 
 Set `VANITYCTL_CONFIG=/path/to/infra/config.yaml` to use a checked-out infrastructure
-repository elsewhere. Add `state/`, `logs/`, and `generated/` to that repository's
+repository elsewhere. Add `state/`, `logs/`, `generated/`, and `plugins/cache/` to that repository's
 `.gitignore`. The main file and every fragment use strict parsing: misspelled or
 unknown fields fail validation instead of being ignored.
 
@@ -153,6 +154,13 @@ services:
       EULA: "TRUE"
     restart: always
 ```
+
+Reusable integrations can be declared as version-pinned, data-only plugins. The
+built-in standard library starts with `supabase-selfhost`; local directories and
+immutable Git commit sources are also supported. Plugins resolve to ordinary
+services without install-time extension code. A plugin may also materialize one
+commit-pinned upstream application repository into a missing or empty directory. See
+[Declarative plugins](docs/plugins.md).
 
 ### Docker
 
@@ -185,11 +193,21 @@ Compose remains responsible for its application's internal topology:
 immich:
   type: compose
   directory: ~/services/immich
-  file: compose.yaml
+  files:
+    - compose.yaml
+    - compose.production.yaml
 ```
 
 vanityctl runs the matching `docker compose` lifecycle and log commands from that
-directory. It does not rewrite the Compose file.
+directory. File order is preserved for every command. The singular `file:` key is
+still accepted for existing configurations, but new configurations should use
+`files:`. Relative paths resolve from `directory`; validation fails before mutation
+if any file is missing or unreadable.
+
+`vanityctl pull immich` and `vanityctl build immich` expose Compose's corresponding
+operations. A Git deployment pulls and builds before replacing the running stack.
+Repeated `apply` calls skip unchanged Compose projects; changes to any configured
+Compose file invalidate the reconciliation fingerprint.
 
 ### Native processes
 
@@ -209,6 +227,16 @@ to overwrite a generated-path file that lacks its ownership marker.
 
 `command` is executed directly, not via an implicit shell. Use an explicit script
 or `/bin/sh` plus arguments if shell behavior is actually needed.
+
+Existing user LaunchAgents require an explicit, dry-run-first ownership handoff:
+
+```console
+vanityctl adopt launchd com.example.worker --as worker
+vanityctl adopt launchd com.example.worker --as worker --execute
+```
+
+See [Adopting an existing launchd service](docs/launchd-adoption.md) for the
+supported plist shape, duplicate-process protection, rollback, and limitations.
 
 ### Scheduled jobs
 
@@ -322,8 +350,12 @@ vanityctl list [--json]
 vanityctl status [SERVICE] [--json]       (alias: ps)
 vanityctl describe SERVICE [--json]
 vanityctl start|stop|restart SERVICE
+vanityctl pull|build SERVICE              (Compose services)
 vanityctl logs SERVICE [-f] [--lines N]
 vanityctl apply
+vanityctl apply --dry-run
+vanityctl plugin [list|library]
+vanityctl plugin describe INSTANCE
 vanityctl deploy SERVICE [--retry]
 vanityctl deploy history|logs SERVICE
 vanityctl deploy auto-enable|auto-disable SERVICE
@@ -344,10 +376,24 @@ The daemon API includes `/api/services`, per-service lifecycle/log/deployment ro
 `hostd`, refreshes machine state, offers workload-appropriate restart/run actions,
 and shows redacted configuration and recent logs.
 
-The API binds to `127.0.0.1:7788` by default. A non-loopback listener is rejected
-unless `api.token_env` is configured; requests then require a bearer token. Do not
-assume a LAN is trusted. Prefer Tailscale, a Cloudflare Tunnel, or an authenticated
-reverse proxy for future remote access.
+The API binds to `127.0.0.1:7788` by default. Configure `api.token_env` or
+`api.token_file` to require a bearer token. For a public status dashboard while
+keeping machine controls private, enable the explicit read-only allowlist:
+
+```yaml
+api:
+  token_file: ~/.vanityctl/api-token
+  public_read_only: true
+```
+
+This exposes status, host resource usage, jobs, activity, and DNS status. Logs,
+configuration, agent context, and every mutating route remain authenticated. A
+non-loopback listener still requires a token source. Do not assume a LAN is trusted.
+
+The dashboard reports host CPU and RAM usage and, on Apple Silicon Macs, GPU
+utilization and GPU-associated system memory when the graphics driver publishes
+those counters. Docker and Compose rows report CPU and RAM; Compose values are
+aggregated across the project's running containers.
 
 ## AI-agent integration
 

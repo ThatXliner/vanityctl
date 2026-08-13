@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use reqwest::{Client, Method, Response};
 use serde_json::Value;
-use vanityctl::{ConfigPaths, HostConfig};
+use vanityctl::{ConfigPaths, HostConfig, adopt::LaunchdAdopter, runner::SystemRunner};
 
 #[derive(Parser)]
 #[command(
@@ -24,6 +24,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Safely import an existing resource into vanityctl ownership
+    Adopt {
+        #[command(subcommand)]
+        command: AdoptCommand,
+    },
     List,
     #[command(alias = "ps")]
     Status {
@@ -41,6 +46,14 @@ enum Command {
     Restart {
         service: String,
     },
+    /// Pull images for a Compose service.
+    Pull {
+        service: String,
+    },
+    /// Build images for a Compose service.
+    Build {
+        service: String,
+    },
     Logs {
         service: String,
         #[arg(short = 'f', long)]
@@ -54,7 +67,16 @@ enum Command {
         #[arg(long)]
         retry: bool,
     },
-    Apply,
+    Apply {
+        /// Validate and show resolved plugin/services without changing the machine.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Inspect resolved plugin instances and the bundled plugin library.
+    Plugin {
+        #[command(subcommand)]
+        command: Option<PluginCommand>,
+    },
     Run {
         service: String,
     },
@@ -82,6 +104,19 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum AdoptCommand {
+    /// Inspect and adopt an existing user LaunchAgent
+    Launchd {
+        label: String,
+        #[arg(long = "as", value_name = "SERVICE")]
+        service: String,
+        /// Perform the handoff. Without this flag, only a redacted plan is shown.
+        #[arg(long)]
+        execute: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum ConfigCommand {
     Validate,
 }
@@ -90,6 +125,13 @@ enum DnsCommand {
     Status,
     Records,
     Reconcile,
+}
+
+#[derive(Subcommand)]
+enum PluginCommand {
+    List,
+    Describe { instance: String },
+    Library,
 }
 
 struct Api {
@@ -139,11 +181,31 @@ impl Api {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Command::Adopt {
+        command:
+            AdoptCommand::Launchd {
+                label,
+                service,
+                execute,
+            },
+    } = &cli.command
+    {
+        let adopter =
+            LaunchdAdopter::discover(ConfigPaths::discover()?, std::sync::Arc::new(SystemRunner))?;
+        let result = adopter.adopt(label, service, *execute)?;
+        if cli.json {
+            print_json(&serde_json::to_value(result)?)?;
+        } else {
+            println!("{}", result.render());
+        }
+        return Ok(());
+    }
     if matches!(cli.command, Command::Config { .. }) {
         let config = HostConfig::load(&ConfigPaths::discover()?)?;
         println!(
-            "configuration valid: {} services (schema v{})",
+            "configuration valid: {} services, {} plugins (schema v{})",
             config.services.len(),
+            config.resolved_plugins.len(),
             config.version
         );
         return Ok(());
@@ -186,6 +248,8 @@ async fn main() -> Result<()> {
         Command::Start { service } => action(&api, &service, "start").await?,
         Command::Stop { service } => action(&api, &service, "stop").await?,
         Command::Restart { service } => action(&api, &service, "restart").await?,
+        Command::Pull { service } => action(&api, &service, "pull").await?,
+        Command::Build { service } => action(&api, &service, "build").await?,
         Command::Logs {
             service,
             follow,
@@ -196,7 +260,26 @@ async fn main() -> Result<()> {
             name,
             retry,
         } => deploy_command(&api, &target, name.as_deref(), retry, cli.json).await?,
-        Command::Apply => output(api.json(Method::POST, "/api/apply").await?, cli.json)?,
+        Command::Apply { dry_run } => {
+            let (method, path) = if dry_run {
+                (Method::GET, "/api/apply/plan")
+            } else {
+                (Method::POST, "/api/apply")
+            };
+            output(api.json(method, path).await?, cli.json)?
+        }
+        Command::Plugin { command } => match command.unwrap_or(PluginCommand::List) {
+            PluginCommand::List => output(api.json(Method::GET, "/api/plugins").await?, cli.json)?,
+            PluginCommand::Describe { instance } => output(
+                api.json(Method::GET, &format!("/api/plugins/{instance}"))
+                    .await?,
+                cli.json,
+            )?,
+            PluginCommand::Library => output(
+                api.json(Method::GET, "/api/plugins/library").await?,
+                cli.json,
+            )?,
+        },
         Command::Run { service } => output(
             api.json(Method::POST, &format!("/api/jobs/{service}/run"))
                 .await?,
@@ -237,6 +320,7 @@ async fn main() -> Result<()> {
             )?,
         },
         Command::Dashboard => println!("{}", api.base),
+        Command::Adopt { .. } => unreachable!(),
         Command::Config { .. } => unreachable!(),
     }
     Ok(())

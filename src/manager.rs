@@ -1,9 +1,16 @@
-use std::{collections::BTreeMap, fs, sync::Arc, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::Serialize;
 use serde_json::{Value, json};
+use sysinfo::System;
 
 use crate::{
     backend::BackendSet,
@@ -11,6 +18,7 @@ use crate::{
     deploy::DeployCoordinator,
     dns::{DnsReconciler, DnsStatus},
     model::{DeploymentRecord, Event, JobRun, RuntimeState, Service, ServiceStatus, ServiceType},
+    plugin::{PluginApplication, PluginResolution, application_directory, stdlib_catalog},
     runner::{SharedRunner, SystemRunner},
     state::StateStore,
 };
@@ -22,6 +30,7 @@ pub struct Manager {
     state: Arc<StateStore>,
     deployer: DeployCoordinator,
     dns: DnsReconciler,
+    system: Mutex<System>,
 }
 
 #[derive(Debug, Serialize)]
@@ -34,13 +43,32 @@ pub struct ApplyResult {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ApplyPlan {
+    pub services: Vec<String>,
+    pub plugins: Vec<PluginResolution>,
+    pub actions: Vec<String>,
+    pub note: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DoctorReport {
     pub healthy: bool,
     pub version: String,
     pub os: String,
     pub hostname: String,
     pub config: String,
+    pub resources: HostResources,
     pub checks: Vec<DoctorCheck>,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostResources {
+    pub cpu_percent: f64,
+    pub memory_used_bytes: u64,
+    pub memory_total_bytes: u64,
+    pub gpu_percent: Option<f64>,
+    pub gpu_memory_bytes: Option<u64>,
 }
 #[derive(Debug, Serialize)]
 pub struct DoctorCheck {
@@ -60,6 +88,7 @@ impl Manager {
             backends: BackendSet::new(runner.clone(), paths.clone()),
             deployer: DeployCoordinator::new(runner.clone(), state.clone(), paths.clone()),
             dns: DnsReconciler::new(state.clone()),
+            system: Mutex::new(System::new_all()),
             paths,
             runner,
             state,
@@ -133,7 +162,24 @@ impl Manager {
             unchanged: vec![],
             errors: BTreeMap::new(),
         };
+        let mut unavailable_plugins = BTreeSet::new();
+        for (instance, plugin) in &config.resolved_plugins {
+            let Some(application) = &plugin.application else {
+                continue;
+            };
+            if let Err(error) = self.materialize_plugin_source(instance, application) {
+                result.errors.insert(instance.clone(), format!("{error:#}"));
+                unavailable_plugins.insert(instance.clone());
+            }
+        }
         for (name, service) in &config.services {
+            if service
+                .generated_by
+                .as_ref()
+                .is_some_and(|plugin| unavailable_plugins.contains(&plugin.instance))
+            {
+                continue;
+            }
             let outcome = self.ensure_source(service);
             if let Err(error) = outcome {
                 result.errors.insert(name.clone(), format!("{error:#}"));
@@ -172,6 +218,225 @@ impl Manager {
             ),
         )?;
         Ok(result)
+    }
+
+    pub fn apply_plan(&self) -> Result<ApplyPlan> {
+        let config = self.config()?;
+        Ok(ApplyPlan {
+            services: config.services.keys().cloned().collect(),
+            plugins: config.resolved_plugins.values().cloned().collect(),
+            actions: config
+                .resolved_plugins
+                .iter()
+                .filter_map(|(name, plugin)| {
+                    plugin.application.as_ref().map(|application| {
+                        format!(
+                            "materialize {name} from {}@{}",
+                            application.repo, application.revision
+                        )
+                    })
+                })
+                .chain(
+                    config
+                        .services
+                        .iter()
+                        .map(|(name, service)| format!("reconcile {name} ({:?})", service.kind)),
+                )
+                .collect(),
+            note: "dry run only; no service, scheduler, Docker, or launchd changes were made",
+        })
+    }
+
+    pub fn plugins(&self) -> Result<Vec<PluginResolution>> {
+        Ok(self.config()?.resolved_plugins.into_values().collect())
+    }
+
+    pub fn plugin(&self, name: &str) -> Result<PluginResolution> {
+        self.config()?
+            .resolved_plugins
+            .remove(name)
+            .with_context(|| format!("unknown plugin instance {name:?}"))
+    }
+
+    pub fn plugin_library(&self) -> Value {
+        json!(stdlib_catalog())
+    }
+
+    pub fn materialize_plugin_sources(&self) -> Result<Vec<String>> {
+        let config = self.config()?;
+        let mut changed = Vec::new();
+        for (instance, plugin) in &config.resolved_plugins {
+            if let Some(application) = &plugin.application
+                && self.materialize_plugin_source(instance, application)?
+            {
+                changed.push(instance.clone());
+            }
+        }
+        Ok(changed)
+    }
+
+    fn materialize_plugin_source(
+        &self,
+        instance: &str,
+        application: &PluginApplication,
+    ) -> Result<bool> {
+        let target = expand_path(&application.directory)?;
+        let marker = self.plugin_source_marker(instance);
+        if target.exists() && fs::read_dir(&target)?.next().is_some() {
+            let recorded: PluginApplication = serde_json::from_slice(
+                &fs::read(&marker).with_context(|| {
+                    format!(
+                        "plugin {instance}: {} is not empty and has no vanityctl ownership marker; move it aside or choose another directory",
+                        target.display()
+                    )
+                })?,
+            )?;
+            if recorded.repo != application.repo
+                || recorded.revision != application.revision
+                || recorded.subdirectory != application.subdirectory
+                || recorded.directory != application.directory
+            {
+                bail!(
+                    "plugin {instance}: existing source ownership does not match the requested pinned source; vanityctl will not overwrite it"
+                );
+            }
+            self.verify_plugin_checkout(instance, application, &target)?;
+            return Ok(false);
+        }
+
+        let parent = target
+            .parent()
+            .context("plugin application directory has no parent")?;
+        fs::create_dir_all(parent)?;
+        let temporary = parent.join(format!(
+            ".vanityctl-{instance}-clone-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let clone_result = self.runner.run(
+            "git",
+            &[
+                "clone".into(),
+                "--no-checkout".into(),
+                "--filter=blob:none".into(),
+                "--".into(),
+                application.repo.clone(),
+                temporary.display().to_string(),
+            ],
+            None,
+        );
+        if let Err(error) = clone_result {
+            remove_temporary(&temporary);
+            return Err(error)
+                .with_context(|| format!("plugin {instance}: clone application source"));
+        }
+        let checkout = self.runner.run(
+            "git",
+            &[
+                "checkout".into(),
+                "--detach".into(),
+                application.revision.clone(),
+            ],
+            Some(&temporary),
+        );
+        if let Err(error) = checkout {
+            remove_temporary(&temporary);
+            return Err(error).with_context(|| {
+                format!("plugin {instance}: checkout pinned application revision")
+            });
+        }
+        if let Some(subdirectory) = &application.subdirectory
+            && !temporary.join(subdirectory).is_dir()
+        {
+            remove_temporary(&temporary);
+            bail!(
+                "plugin {instance}: application subdirectory {subdirectory:?} does not exist at revision {}",
+                application.revision
+            );
+        }
+        if let Err(error) = self.verify_plugin_checkout(instance, application, &temporary) {
+            remove_temporary(&temporary);
+            return Err(error)
+                .with_context(|| format!("plugin {instance}: verify cloned application source"));
+        }
+        let restore_empty_directory = target.exists();
+        if restore_empty_directory && let Err(error) = fs::remove_dir(&target) {
+            remove_temporary(&temporary);
+            return Err(error)
+                .with_context(|| format!("plugin {instance}: existing target is no longer empty"));
+        }
+        if let Err(error) = fs::rename(&temporary, &target) {
+            remove_temporary(&temporary);
+            if restore_empty_directory {
+                let _ = fs::create_dir(&target);
+            }
+            return Err(error).with_context(|| {
+                format!("plugin {instance}: install source at {}", target.display())
+            });
+        }
+        if let Err(error) = write_json_atomically(&marker, application) {
+            remove_temporary(&target);
+            if restore_empty_directory {
+                let _ = fs::create_dir(&target);
+            }
+            return Err(error).with_context(|| {
+                format!("plugin {instance}: record source ownership; cloned source was rolled back")
+            });
+        }
+        Ok(true)
+    }
+
+    fn verify_plugin_checkout(
+        &self,
+        instance: &str,
+        application: &PluginApplication,
+        directory: &Path,
+    ) -> Result<()> {
+        let head = self
+            .runner
+            .run("git", &["rev-parse".into(), "HEAD".into()], Some(directory))?
+            .stdout
+            .trim()
+            .to_string();
+        if head != application.revision {
+            bail!(
+                "plugin {instance}: source checkout is {head}, expected {}",
+                application.revision
+            );
+        }
+        let origin = self
+            .runner
+            .run(
+                "git",
+                &["remote".into(), "get-url".into(), "origin".into()],
+                Some(directory),
+            )?
+            .stdout
+            .trim()
+            .to_string();
+        if origin != application.repo {
+            bail!(
+                "plugin {instance}: source origin is {origin:?}, expected {:?}",
+                application.repo
+            );
+        }
+        let resolved = application_directory(application);
+        let relative = application.subdirectory.as_deref().unwrap_or("");
+        let expected = if directory == expand_path(&application.directory)? {
+            resolved
+        } else {
+            directory.join(relative)
+        };
+        if !expected.is_dir() {
+            bail!("plugin {instance}: resolved application directory is missing");
+        }
+        Ok(())
+    }
+
+    fn plugin_source_marker(&self, instance: &str) -> PathBuf {
+        self.paths
+            .state
+            .join("plugin-sources")
+            .join(format!("{instance}.json"))
     }
 
     fn ensure_source(&self, service: &Service) -> Result<()> {
@@ -227,6 +492,18 @@ impl Manager {
             .logs(name, &service, lines)
             .await
     }
+    pub async fn compose_operation(&self, name: &str, operation: &str) -> Result<()> {
+        let service = self.service(name)?;
+        if service.kind != ServiceType::Compose {
+            bail!("service {name} is not a compose service");
+        }
+        let backend = self.backends.get(&service.kind);
+        match operation {
+            "pull" => backend.pull(name, &service).await,
+            "build" => backend.build(name, &service).await,
+            _ => bail!("unsupported compose operation {operation}"),
+        }
+    }
     pub async fn deploy(&self, name: &str, trigger: &str, retry: bool) -> Result<DeploymentRecord> {
         let service = self.service(name)?;
         self.deployer
@@ -269,7 +546,24 @@ impl Manager {
                 json!(service.environment.keys().collect::<Vec<_>>()),
             );
             if service.env_file.is_some() {
+                object.remove("env_file");
                 object.insert("envFile".into(), json!("configured (value hidden)"));
+            }
+            if service.kind == ServiceType::Compose {
+                let directory = expand_path(service.directory.as_deref().unwrap())?;
+                let files = service.compose_files();
+                object.remove("file");
+                object.insert("files".into(), json!(files));
+                object.insert(
+                    "resolvedFiles".into(),
+                    json!(
+                        service
+                            .compose_files()
+                            .into_iter()
+                            .map(|file| crate::config::resolve_compose_file(&directory, file))
+                            .collect::<Result<Vec<_>>>()?
+                    ),
+                );
             }
         }
         Ok(value)
@@ -418,7 +712,44 @@ impl Manager {
             os: std::env::consts::OS.into(),
             hostname: hostname(),
             config: self.paths.config.display().to_string(),
+            resources: self.host_resources(),
             checks,
+        }
+    }
+    fn host_resources(&self) -> HostResources {
+        let mut system = self
+            .system
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        system.refresh_cpu_usage();
+
+        #[cfg(target_os = "macos")]
+        let (gpu_percent, gpu_memory_bytes) = self
+            .runner
+            .run(
+                "ioreg",
+                &[
+                    "-r".into(),
+                    "-c".into(),
+                    "AGXAccelerator".into(),
+                    "-l".into(),
+                    "-w".into(),
+                    "0".into(),
+                ],
+                None,
+            )
+            .ok()
+            .map(|output| parse_apple_gpu_metrics(&output.stdout))
+            .unwrap_or((None, None));
+        #[cfg(not(target_os = "macos"))]
+        let (gpu_percent, gpu_memory_bytes) = (None, None);
+
+        HostResources {
+            cpu_percent: system.global_cpu_usage() as f64,
+            memory_used_bytes: system.used_memory(),
+            memory_total_bytes: system.total_memory(),
+            gpu_percent,
+            gpu_memory_bytes,
         }
     }
     pub fn agent_context(&self) -> Result<String> {
@@ -532,6 +863,20 @@ fn check_command(runner: &SharedRunner, name: &str, args: &[&str]) -> DoctorChec
         },
     }
 }
+
+fn remove_temporary(path: &Path) {
+    if path.exists() {
+        let _ = fs::remove_dir_all(path);
+    }
+}
+
+fn write_json_atomically(path: &Path, value: &impl Serialize) -> Result<()> {
+    fs::create_dir_all(path.parent().context("state marker has no parent")?)?;
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, serde_json::to_vec_pretty(value)?)?;
+    fs::rename(temporary, path)?;
+    Ok(())
+}
 fn hostname() -> String {
     std::process::Command::new("hostname")
         .output()
@@ -539,4 +884,38 @@ fn hostname() -> String {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".into())
+}
+
+fn parse_apple_gpu_metrics(output: &str) -> (Option<f64>, Option<u64>) {
+    let value_after = |key: &str| {
+        output.split(key).nth(1).and_then(|tail| {
+            tail.split_once('=')
+                .map(|(_, value)| value)
+                .and_then(|value| {
+                    value
+                        .trim_start()
+                        .split(|c: char| !c.is_ascii_digit() && c != '.')
+                        .find(|part| !part.is_empty())
+                })
+                .and_then(|value| value.parse::<f64>().ok())
+        })
+    };
+    (
+        value_after("Device Utilization %"),
+        value_after("In use system memory\"").map(|value| value as u64),
+    )
+}
+
+#[cfg(test)]
+mod metrics_tests {
+    use super::parse_apple_gpu_metrics;
+
+    #[test]
+    fn parses_apple_gpu_utilization_and_memory() {
+        let input = r#""PerformanceStatistics" = {"In use system memory"=1007599616,"Device Utilization %"=71}"#;
+        assert_eq!(
+            parse_apple_gpu_metrics(input),
+            (Some(71.0), Some(1_007_599_616))
+        );
+    }
 }

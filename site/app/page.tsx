@@ -1,221 +1,138 @@
 const github = "https://github.com/ThatXliner/vanityctl";
 
-const workloads = [
-  { name: "billion", type: "docker", state: "running", detail: "main@a81d3f" },
-  { name: "minecraft", type: "docker", state: "running", detail: ":25565" },
-  { name: "local-llm", type: "process", state: "running", detail: "pid 4921" },
-  { name: "scraper", type: "job", state: "idle", detail: "last run ✓" },
-  { name: "cloudflare-ddns", type: "job", state: "idle", detail: "synced ✓" },
+const services = [
+  ["billion", "docker", "running", "main@a81d3f"],
+  ["minecraft", "docker", "running", ":25565"],
+  ["local-llm", "process", "running", "pid 4921"],
+  ["scraper", "job", "idle", "last run ✓"],
+  ["cloudflare-ddns", "job", "idle", "synced ✓"],
 ];
 
-const serviceTypes = [
-  {
-    index: "01",
-    title: "Containers",
-    body: "Run a single image, build a Dockerfile, or keep an existing Compose stack intact.",
-    code: "type: docker",
-  },
-  {
-    index: "02",
-    title: "Native processes",
-    body: "Treat host binaries and scripts as first-class workloads, supervised by launchd.",
-    code: "type: process",
-  },
-  {
-    index: "03",
-    title: "Scheduled jobs",
-    body: "Run backups, scrapers, and maintenance on a schedule with history and logs.",
-    code: "type: job",
-  },
-  {
-    index: "04",
-    title: "Git deployments",
-    body: "Pull an exact commit, run explicit hooks, rebuild safely, and record what happened.",
-    code: "deploy: { auto: true }",
-  },
-];
-
-const commands = [
-  ["See the whole machine", "vanityctl status"],
-  ["Inspect one service", "vanityctl describe billion --json"],
-  ["Operate consistently", "vanityctl restart minecraft"],
-  ["Deploy deterministically", "vanityctl deploy billion"],
-  ["Run a scheduled job now", "vanityctl run scraper"],
-  ["Reconcile desired state", "vanityctl apply --dry-run"],
-];
+function Prompt({ children }: { children: React.ReactNode }) {
+  return <div className="prompt"><span className="prompt-host">big-mac</span><span className="prompt-path">~</span><span className="prompt-mark">❯</span><span>{children}</span></div>;
+}
 
 export default function Home() {
   return (
-    <main>
-      <header className="site-header shell">
-        <a className="wordmark" href="#top" aria-label="vanityctl home">
-          <span aria-hidden="true">{`{`}</span> vanityctl <span aria-hidden="true">{`}`}</span>
-        </a>
-        <nav aria-label="Primary navigation">
-          <a href="#why">Why</a>
-          <a href="#model">Model</a>
-          <a href="#dogfood">Dogfood</a>
-          <a className="nav-github" href={github}>GitHub ↗</a>
+    <main id="top">
+      <div className="terminal-window">
+        <header className="titlebar">
+          <div className="traffic" aria-hidden="true"><i /><i /><i /></div>
+          <span>big-mac — vanityctl — 120×40</span>
+          <a href={github} aria-label="Open vanityctl on GitHub">github ↗</a>
+        </header>
+
+        <nav aria-label="Page sections">
+          <a href="#why">01 why</a><a href="#model">02 model</a>
+          <a href="#dogfood">03 dogfood</a><a href="#install">04 install</a>
         </nav>
-      </header>
 
-      <section className="hero shell" id="top">
-        <div className="hero-copy">
-          <p className="eyebrow"><span>Open source</span><span>macOS first</span><span>one machine</span></p>
-          <h1>Everything this machine is responsible for.</h1>
-          <p className="hero-deck">
-            One declarative registry and one predictable command surface for Docker,
-            Compose, native processes, scheduled jobs, Git deployments, and DNS.
-          </p>
-          <div className="hero-actions">
-            <a className="button button-primary" href={github}>View on GitHub <span>↗</span></a>
-            <a className="button button-secondary" href={`${github}#quick-start`}>Quick start <span>→</span></a>
-          </div>
-          <p className="install"><span>$</span> cargo install --git {github}.git</p>
-        </div>
-
-        <div className="terminal-wrap" aria-label="Example vanityctl status output">
-          <div className="terminal-chrome">
-            <span className="terminal-title">big-mac / status</span>
-            <span className="terminal-live"><i /> live</span>
-          </div>
-          <div className="terminal">
-            <p><b>$</b> vanityctl status</p>
-            <div className="terminal-table terminal-head">
-              <span>NAME</span><span>TYPE</span><span>STATE</span><span>DETAILS</span>
+        <div className="session">
+          <section className="hero">
+            <Prompt>vanityctl about</Prompt>
+            <div className="hero-output output-block">
+              <p className="comment"># one control plane for this computer</p>
+              <h1>Everything this machine<br />is responsible for.</h1>
+              <p className="lede">One declarative registry and one predictable command surface for Docker, Compose, native processes, scheduled jobs, Git deployments, and DNS.</p>
+              <div className="hero-links"><a href={github}>[ view source ↗ ]</a><a href={`${github}/blob/main/docs/README.md`}>[ read the docs ]</a></div>
             </div>
-            {workloads.map((item) => (
-              <div className="terminal-table" key={item.name}>
-                <span>{item.name}</span>
-                <span className="terminal-muted">{item.type}</span>
-                <span className={`state state-${item.state}`}><i />{item.state}</span>
-                <span className="terminal-muted">{item.detail}</span>
-              </div>
-            ))}
-            <div className="terminal-prompt"><b>$</b><span className="cursor" /></div>
-          </div>
-          <div className="terminal-caption">
-            Same verbs. Correct backend. No operational archaeology.
-          </div>
-        </div>
-      </section>
+          </section>
 
-      <section className="manifesto" id="why">
-        <div className="shell manifesto-grid">
-          <p className="section-kicker">The question</p>
-          <div>
-            <p className="quote">“What should be running on this machine?”</p>
-            <p className="manifesto-copy">
-              Most tools begin with a technology: containers, processes, applications,
-              or clusters. vanityctl begins with the computer. Every workload becomes a
-              peer in one version-controlled model—without pretending everything is Docker.
-            </p>
-          </div>
-        </div>
-      </section>
-
-      <section className="service-model shell" id="model">
-        <div className="section-heading">
-          <div><p className="section-kicker">One service model</p><h2>Your server is not one thing.</h2></div>
-          <p>Five services or one hundred. The operational vocabulary stays small.</p>
-        </div>
-        <div className="service-grid">
-          {serviceTypes.map((service) => (
-            <article className="service-card" key={service.index}>
-              <div className="service-card-top"><span>{service.index}</span><code>{service.code}</code></div>
-              <h3>{service.title}</h3>
-              <p>{service.body}</p>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="architecture-section">
-        <div className="shell">
-          <div className="section-heading architecture-heading">
-            <div><p className="section-kicker">The control plane</p><h2>Boring by design.</h2></div>
-            <p>vanityctl uses the reliable tools already on your machine. It does not replace them.</p>
-          </div>
-          <div className="architecture" role="img" aria-label="YAML desired state flows through hostd to Docker, launchd, Git, and DNS, with CLI and web clients">
-            <div className="architecture-node architecture-source"><small>DESIRED STATE</small><strong>YAML registry</strong><span>version controlled</span></div>
-            <div className="architecture-line"><span>↓</span></div>
-            <div className="architecture-node architecture-hostd"><small>CONTROL PLANE</small><strong>hostd</strong><span>localhost API · source of truth</span></div>
-            <div className="architecture-line architecture-split"><span>↙</span><span>↓</span><span>↓</span><span>↘</span></div>
-            <div className="architecture-targets">
-              <div><strong>Docker</strong><span>containers + Compose</span></div>
-              <div><strong>launchd</strong><span>processes + jobs</span></div>
-              <div><strong>Git</strong><span>deploys + polling</span></div>
-              <div><strong>DNS</strong><span>Cloudflare records</span></div>
+          <section className="status-section" aria-label="Example service status">
+            <Prompt>vanityctl status <span className="flag">--all</span></Prompt>
+            <div className="status-table output-block">
+              <div className="status-row status-head"><span>NAME</span><span>TYPE</span><span>STATE</span><span>DETAILS</span></div>
+              {services.map(([name, type, state, detail]) => (
+                <div className="status-row" key={name}>
+                  <span>{name}</span><span className="muted">{type}</span>
+                  <span className={`status-${state}`}><i />{state}</span><span className="muted">{detail}</span>
+                </div>
+              ))}
+              <p className="success">✓ 5 services · 0 operational mysteries</p>
             </div>
-            <div className="architecture-clients"><span>vanityctl CLI</span><i>↔</i><span>local dashboard</span></div>
-          </div>
-        </div>
-      </section>
+          </section>
 
-      <section className="commands-section shell">
-        <div className="commands-copy">
-          <p className="section-kicker">Predictable operations</p>
-          <h2>A small command surface for humans and agents.</h2>
-          <p>
-            Stop asking every repository how it wants to be deployed. The registry holds
-            that knowledge once; the CLI and JSON API expose it everywhere.
-          </p>
-          <a href={`${github}#ai-agent-integration`}>AI-agent integration →</a>
-        </div>
-        <div className="command-list">
-          {commands.map(([label, command]) => (
-            <div className="command-row" key={command}>
-              <span>{label}</span><code><b>$</b> {command}</code>
+          <section id="why">
+            <Prompt>vanityctl principles</Prompt>
+            <div className="principles output-block">
+              <article><span className="index">01</span><h2>organized</h2><p>Every service and its operational metadata lives in one inspectable, version-controlled registry. No more deployment instructions scattered across repos, plists, scripts, and memory.</p></article>
+              <article><span className="index">02</span><h2>unified</h2><p>Every workload uses the same small vocabulary. Humans and agents run <code>status</code>, <code>logs</code>, <code>restart</code>, and <code>deploy</code>; vanityctl chooses the backend.</p></article>
+              <article><span className="index">03</span><h2>simple</h2><p>Compose stays Compose. launchd stays launchd. Configuration is ordinary YAML, persistent data stays yours, and uninstalling does not require escaping a platform.</p></article>
             </div>
-          ))}
-        </div>
-      </section>
+          </section>
 
-      <section className="dogfood" id="dogfood">
-        <div className="shell dogfood-grid">
-          <div>
-            <p className="section-kicker section-kicker-light">Dogfooded on a real Mac Studio</p>
-            <h2>11 existing stacks.<br />Zero containers replaced.</h2>
-            <p>
-              vanityctl was installed on <code>big-mac</code>, adopted eleven live Compose
-              projects, reconciled them safely, and surfaced an unhealthy relay the old
-              machine-wide view could not show.
-            </p>
-          </div>
-          <div className="proof-grid">
-            <div><strong>11</strong><span>Compose projects adopted</span></div>
-            <div><strong>0</strong><span>container IDs changed</span></div>
-            <div><strong>0 / 11</strong><span>changed / unchanged on second apply</span></div>
-            <div><strong>1</strong><span>unhealthy workload surfaced</span></div>
-          </div>
-        </div>
-      </section>
+          <section id="model">
+            <Prompt>cat ~/.vanityctl/config.yaml</Prompt>
+            <div className="code-output output-block" aria-label="Example vanityctl YAML configuration">
+              <pre><code><span className="key">version:</span> <span className="value">1</span>{`\n\n`}<span className="key">services:</span>{`\n`}  <span className="service">minecraft:</span>{`\n`}    <span className="key">type:</span> docker{`\n`}    <span className="key">image:</span> itzg/minecraft-server{`\n`}    <span className="key">ports:</span> [<span className="string">&quot;25565:25565&quot;</span>]{`\n`}    <span className="key">restart:</span> always{`\n\n`}  <span className="service">local-llm:</span>{`\n`}    <span className="key">type:</span> process{`\n`}    <span className="key">command:</span> ./serve.sh{`\n`}    <span className="key">restart:</span> always{`\n\n`}  <span className="service">scraper:</span>{`\n`}    <span className="key">type:</span> job{`\n`}    <span className="key">command:</span> ./scrape.sh{`\n`}    <span className="key">schedule:</span> <span className="string">&quot;0 4 * * *&quot;</span></code></pre>
+              <div className="annotation"><span>one file</span><span>three runtimes</span><span>same lifecycle</span></div>
+            </div>
+          </section>
 
-      <section className="not-kubernetes shell">
-        <div className="not-kubernetes-title"><p className="section-kicker">The niche</p><h2>Not the smallest Kubernetes.</h2></div>
-        <div className="not-kubernetes-copy">
-          <p>Not a container dashboard. Not a replacement init system. Not another PaaS.</p>
-          <p>
-            vanityctl is a <strong>single-node declarative control plane</strong> for
-            self-hosters and developers. Docker runs containers. launchd supervises
-            processes. Git stores source. vanityctl makes the whole machine legible.
-          </p>
-          <a href={`${github}/blob/main/docs/comparison.md`}>Compare with existing tools →</a>
-        </div>
-      </section>
+          <section>
+            <Prompt>vanityctl architecture <span className="flag">--tree</span></Prompt>
+            <div className="tree output-block" role="img" aria-label="vanityctl architecture tree">
+              <p><b>~/.vanityctl/</b></p>
+              <p>├── <b>config.yaml</b> <em># desired state</em></p>
+              <p>└── <span className="accent">hostd</span> <em># localhost control plane</em></p>
+              <p>    ├── docker <em>containers + Compose</em></p>
+              <p>    ├── launchd <em>processes + jobs</em></p>
+              <p>    ├── git <em>deploys + polling</em></p>
+              <p>    └── dns <em>Cloudflare records</em></p>
+              <p className="tree-gap">        ▲</p>
+              <p>        ├── vanityctl <em>CLI + stable JSON</em></p>
+              <p>        └── dashboard <em>same API, no orchestration logic</em></p>
+            </div>
+          </section>
 
-      <section className="final-cta">
-        <div className="shell final-cta-inner">
-          <div><p className="section-kicker section-kicker-light">Build the boring layer</p><h2>Make your machine explain itself.</h2></div>
-          <div><a className="button button-light" href={github}>Explore vanityctl on GitHub <span>↗</span></a><p>MIT licensed · Rust · macOS first</p></div>
-        </div>
-      </section>
+          <section className="commands">
+            <Prompt>vanityctl help <span className="flag">--short</span></Prompt>
+            <div className="help-output output-block">
+              <p><span>status</span><code>vanityctl status [service]</code><em>see the whole machine</em></p>
+              <p><span>inspect</span><code>vanityctl describe billion --json</code><em>read operational intent</em></p>
+              <p><span>operate</span><code>vanityctl restart minecraft</code><em>use the correct backend</em></p>
+              <p><span>deploy</span><code>vanityctl deploy billion</code><em>fetch, build, replace safely</em></p>
+              <p><span>run</span><code>vanityctl run scraper</code><em>execute a scheduled job now</em></p>
+              <p><span>reconcile</span><code>vanityctl apply --dry-run</code><em>preview desired-state changes</em></p>
+            </div>
+          </section>
 
-      <footer className="site-footer shell">
-        <a className="wordmark" href="#top"><span>{`{`}</span> vanityctl <span>{`}`}</span></a>
-        <p>One control plane for this computer.</p>
-        <div><a href={github}>GitHub</a><a href={`${github}#quick-start`}>Docs</a><a href={`${github}/blob/main/LICENSE`}>MIT License</a></div>
-      </footer>
+          <section id="dogfood">
+            <Prompt>vanityctl apply <span className="flag">--host big-mac</span></Prompt>
+            <div className="dogfood-output output-block">
+              <p><span className="log-time">16:04:12</span> inspecting existing Compose projects...</p>
+              <p><span className="log-time">16:04:13</span> found <b>11</b> projects and <b>73</b> containers</p>
+              <p><span className="log-time">16:04:14</span> reconciling without replacement...</p>
+              <p><span className="log-time">16:04:15</span> <span className="success">✓ apply complete</span></p>
+              <div className="proof-line"><span><b>11</b> adopted</span><span><b>0</b> container IDs changed</span><span><b>0 / 11</b> drift on second apply</span><span><b>1</b> unhealthy service surfaced</span></div>
+              <p className="comment"># dogfooded on a real Mac Studio, not a slide deck</p>
+            </div>
+          </section>
+
+          <section className="positioning">
+            <Prompt>vanityctl explain <span className="flag">--not-kubernetes</span></Prompt>
+            <div className="output-block">
+              <p className="error">not a container dashboard. not a replacement init system. not another PaaS.</p>
+              <p>Docker runs containers. Compose defines applications. launchd supervises host processes. Git stores source. <b>vanityctl makes the whole machine legible.</b></p>
+              <a href={`${github}/blob/main/docs/comparison.md`}>→ compare with existing tools</a>
+            </div>
+          </section>
+
+          <section id="install" className="install-section">
+            <Prompt>cargo install <span className="flag">--git</span> https://github.com/ThatXliner/vanityctl</Prompt>
+            <div className="install-output output-block">
+              <p>Installing vanityctl v0.1.0...</p><p>Installing hostd v0.1.0...</p><p className="success">✓ ready</p>
+              <h2>Make your machine<br />explain itself.</h2>
+              <div className="cta"><a href={github}>view source on GitHub ↗</a><a href={`${github}/blob/main/docs/guide.md`}>read the complete guide →</a></div>
+            </div>
+          </section>
+
+          <footer>
+            <Prompt><span className="cursor" aria-hidden="true" /></Prompt>
+            <p>MIT licensed · Rust · macOS first · <a href="#top">back to top ↑</a></p>
+          </footer>
+        </div>
+      </div>
     </main>
   );
 }
