@@ -365,10 +365,24 @@ The daemon API includes `/api/services`, per-service lifecycle/log/deployment ro
 `hostd`, refreshes machine state, offers workload-appropriate restart/run actions,
 and shows redacted configuration and recent logs.
 
-The API binds to `127.0.0.1:7788` by default. A non-loopback listener is rejected
-unless `api.token_env` is configured; requests then require a bearer token. Do not
-assume a LAN is trusted. Prefer Tailscale, a Cloudflare Tunnel, or an authenticated
-reverse proxy for future remote access.
+The API binds to `127.0.0.1:7788` by default. Configure `api.token_env` or
+`api.token_file` to require a bearer token. For a public status dashboard while
+keeping machine controls private, enable the explicit read-only allowlist:
+
+```yaml
+api:
+  token_file: ~/.vanityctl/api-token
+  public_read_only: true
+```
+
+This exposes status, host resource usage, jobs, activity, and DNS status. Logs,
+configuration, agent context, and every mutating route remain authenticated. A
+non-loopback listener still requires a token source. Do not assume a LAN is trusted.
+
+The dashboard reports host CPU and RAM usage and, on Apple Silicon Macs, GPU
+utilization and GPU-associated system memory when the graphics driver publishes
+those counters. Docker and Compose rows report CPU and RAM; Compose values are
+aggregated across the project's running containers.
 
 ## AI-agent integration
 

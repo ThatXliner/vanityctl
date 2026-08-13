@@ -28,9 +28,11 @@ config.yaml + services/*.yaml
 - Docker resources are labeled `dev.vanityctl.managed=true` and
   `dev.vanityctl.service=<name>`.
 - Persistent volumes and source directories are never deleted by `apply`.
-- Secrets are references (`env_file`, `token_env`), never returned by the API.
+- Secrets are references (`env_file`, `token_env`, `token_file`), never returned by the API.
 - The API binds to `127.0.0.1` by default and refuses a non-loopback listener unless
-  an API token environment variable is configured.
+  an API token environment variable or token file is configured. Optional public
+  read-only mode uses a strict route allowlist; writes, logs, configuration, and
+  agent context always remain authenticated.
 
 ## V0 boundary
 

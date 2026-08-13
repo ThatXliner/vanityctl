@@ -421,6 +421,7 @@ impl ParsedAgent {
                 image: None,
                 build: None,
                 file: None,
+                files: None,
                 ports: Vec::new(),
                 volumes: Vec::new(),
                 environment: BTreeMap::new(),
