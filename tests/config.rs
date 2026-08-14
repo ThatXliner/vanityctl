@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use tempfile::tempdir;
 use vanityctl::{ConfigPaths, HostConfig};
@@ -160,5 +162,84 @@ fn rejects_compose_file_keys_on_other_service_types() {
             .unwrap_err()
             .to_string()
             .contains("only valid for compose")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn dns_accepts_a_private_token_file() {
+    let dir = tempdir().unwrap();
+    let paths = ConfigPaths::from_root(dir.path());
+    let token = dir.path().join("cloudflare-token");
+    fs::write(&token, "secret-token\n").unwrap();
+    fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(
+        &paths.config,
+        format!(
+            "version: 1\ndns:\n  provider: cloudflare\n  zone_id: zone\n  token_file: {}\nservices: {{}}\n",
+            token.display()
+        ),
+    )
+    .unwrap();
+    HostConfig::load(&paths).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn dns_rejects_ambiguous_missing_and_public_token_files() {
+    let dir = tempdir().unwrap();
+    let public_token = dir.path().join("public-token");
+    fs::write(&public_token, "secret-token\n").unwrap();
+    fs::set_permissions(&public_token, fs::Permissions::from_mode(0o644)).unwrap();
+
+    for (index, credentials, expected) in [
+        (0, String::new(), "requires token_env or token_file"),
+        (
+            1,
+            "  token_env: CLOUDFLARE_API_TOKEN\n  token_file: /tmp/token\n".into(),
+            "either token_env or token_file",
+        ),
+        (
+            2,
+            format!("  token_file: {}\n", public_token.display()),
+            "must not be readable or writable by group/others",
+        ),
+    ] {
+        let paths = ConfigPaths::from_root(dir.path().join(index.to_string()));
+        fs::create_dir_all(&paths.root).unwrap();
+        fs::write(
+            &paths.config,
+            format!(
+                "version: 1\ndns:\n  provider: cloudflare\n  zone_id: zone\n{credentials}services: {{}}\n"
+            ),
+        )
+        .unwrap();
+        let error = format!("{:#}", HostConfig::load(&paths).unwrap_err());
+        assert!(
+            error.contains(expected),
+            "expected {expected:?} in {error:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn native_env_files_must_be_private() {
+    let dir = tempdir().unwrap();
+    let paths = ConfigPaths::from_root(dir.path());
+    let env_file = dir.path().join("worker.env");
+    fs::write(&env_file, "API_TOKEN=secret\n").unwrap();
+    fs::set_permissions(&env_file, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::write(
+        &paths.config,
+        format!(
+            "version: 1\nservices:\n  worker:\n    type: process\n    command: /bin/true\n    env_file: {}\n",
+            env_file.display()
+        ),
+    )
+    .unwrap();
+    assert!(
+        format!("{:#}", HostConfig::load(&paths).unwrap_err())
+            .contains("must not be readable or writable by group/others")
     );
 }

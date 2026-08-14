@@ -19,9 +19,9 @@ candidate service in memory, checks whether the label is loaded, and prints a
 redacted handoff plan. It does not write, move, unload, or start anything.
 
 Environment variable names are reported, but their values are never included in
-human or JSON output. In this release, a plist containing `EnvironmentVariables`
-is rejected: move secrets into a private `env_file` and define that service
-manually instead of importing secret values into version-controlled YAML.
+human or JSON output. During execution, values from `EnvironmentVariables` move to
+`~/.config/vanityctl/secrets/<service>.env` with mode `600`; YAML contains only the
+file reference. Dry-run creates no secret file.
 
 Review the command, arguments, working directory, scheduling, loaded state/PID, and
 old log destinations. To perform the reviewed migration:
@@ -38,7 +38,7 @@ the generated managed plist. The handoff then:
 1. archives the original plist below `~/.vanityctl/adopted/launchd/`, without
    overwriting an existing archive;
 2. writes an ownership-marked service fragment and
-   `dev.vanityctl.<service>.plist`;
+   `dev.vanityctl.<service>.plist`, plus a private environment file when needed;
 3. unloads the original label;
 4. bootstraps the managed label.
 
@@ -59,16 +59,19 @@ The importer currently supports:
 - an exact `Label` match;
 - either `Program` or non-empty `ProgramArguments` (not both);
 - `WorkingDirectory`;
-- boolean `RunAtLoad` and boolean `KeepAlive`;
+- boolean `RunAtLoad`, boolean `KeepAlive`, and `KeepAlive.SuccessfulExit=false`;
 - `StartInterval` when it is a whole number of minutes;
 - one daily `StartCalendarInterval` containing only `Hour` and `Minute`;
 - `StandardOutPath` and `StandardErrorPath` detection (managed logs move to
-  vanityctl's log directory).
+  vanityctl's log directory);
+- string-valued `EnvironmentVariables`, migrated to a private file;
+- `ThrottleInterval`, `ProcessType`, `LowPriorityIO`, and
+  `SoftResourceLimits.NumberOfFiles`.
 
 It deliberately refuses before mutation when it sees semantics it cannot preserve,
-including dictionary-form `KeepAlive`, sockets, Mach services, queue/watch paths,
-resource limits, calendar arrays or weekday/month schedules, simultaneous `Program`
-and `ProgramArguments`, environment values, and unknown plist keys.
+including other dictionary-form `KeepAlive` policies, sockets, Mach services,
+queue/watch paths, unsupported resource limits, calendar arrays or weekday/month
+schedules, simultaneous `Program` and `ProgramArguments`, and unknown plist keys.
 
 Only current-user LaunchAgents are supported. System LaunchAgents, LaunchDaemons,
 plists outside the exact conventional path, labels that are not currently loaded,

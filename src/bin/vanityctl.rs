@@ -1,4 +1,4 @@
-use std::{env, time::Duration};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -143,7 +143,7 @@ impl Api {
     fn discover(override_url: Option<String>) -> Result<Self> {
         let config = HostConfig::load(&ConfigPaths::discover()?)?;
         let base = override_url.unwrap_or_else(|| format!("http://{}", config.api.listen));
-        let token = config.api.token_env.as_ref().map(env::var).transpose()?;
+        let token = config.api.resolve_token()?;
         Ok(Self {
             base: base.trim_end_matches('/').into(),
             token,

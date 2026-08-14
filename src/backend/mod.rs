@@ -674,8 +674,22 @@ fn parse_launchd_pid(value: &str) -> Option<u32> {
 pub fn render_launchd_plist(name: &str, service: &Service, paths: &ConfigPaths) -> Result<String> {
     let command = service.command.as_deref().context("command missing")?;
     let program = expand_path(command)?;
-    let mut args = vec![program.display().to_string()];
-    args.extend(service.args.clone());
+    let mut command_args = vec![program.display().to_string()];
+    command_args.extend(service.args.clone());
+    let args = if let Some(env_file) = &service.env_file {
+        let env_file = expand_path(env_file)?;
+        let mut wrapped = vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "set -a; . \"$1\"; shift; exec \"$@\"".into(),
+            "vanityctl-env".into(),
+            env_file.display().to_string(),
+        ];
+        wrapped.extend(command_args);
+        wrapped
+    } else {
+        command_args
+    };
     let args_xml = args
         .iter()
         .map(|a| format!("    <string>{}</string>", xml_escape(a)))
@@ -711,22 +725,70 @@ pub fn render_launchd_plist(name: &str, service: &Service, paths: &ConfigPaths) 
         })
         .unwrap_or_default();
     let scheduling = match service.kind {
-        ServiceType::Process => format!(
-            "  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><{} />\n",
-            if matches!(service.restart, crate::model::RestartPolicy::No) {
-                "false"
-            } else {
+        ServiceType::Process => {
+            let run_at_load = service.run_at_load.unwrap_or(true);
+            let keep_alive = match service.restart {
+                crate::model::RestartPolicy::No => {
+                    "  <key>KeepAlive</key><false/>\n".to_owned()
+                }
+                crate::model::RestartPolicy::Always
+                | crate::model::RestartPolicy::UnlessStopped => {
+                    "  <key>KeepAlive</key><true/>\n".to_owned()
+                }
+                crate::model::RestartPolicy::OnFailure => "  <key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key><false/>\n  </dict>\n".to_owned(),
+            };
+            format!(
+                "  <key>RunAtLoad</key><{run_at_load}/>\n{keep_alive}",
+                run_at_load = if run_at_load { "true" } else { "false" }
+            )
+        }
+        ServiceType::Job => format!(
+            "{}  <key>RunAtLoad</key><{}/>\n",
+            render_schedule(service.schedule.as_deref().context("schedule missing")?)?,
+            if service.run_at_load.unwrap_or(false) {
                 "true"
+            } else {
+                "false"
             }
         ),
-        ServiceType::Job => {
-            render_schedule(service.schedule.as_deref().context("schedule missing")?)?
-        }
         _ => bail!("launchd only supports process and job"),
     };
+    let throttle = service
+        .throttle_interval
+        .map(|seconds| format!("  <key>ThrottleInterval</key><integer>{seconds}</integer>\n"))
+        .unwrap_or_default();
+    let process_type = service
+        .process_type
+        .as_ref()
+        .map(|kind| {
+            format!(
+                "  <key>ProcessType</key><string>{}</string>\n",
+                kind.launchd_value()
+            )
+        })
+        .unwrap_or_default();
+    let low_priority_io = service
+        .low_priority_io
+        .map(|enabled| {
+            format!(
+                "  <key>LowPriorityIO</key><{}/>\n",
+                if enabled { "true" } else { "false" }
+            )
+        })
+        .unwrap_or_default();
+    let resource_limits = service
+        .resource_limits
+        .as_ref()
+        .and_then(|limits| limits.open_files)
+        .map(|open_files| {
+            format!(
+                "  <key>SoftResourceLimits</key>\n  <dict>\n    <key>NumberOfFiles</key><integer>{open_files}</integer>\n  </dict>\n"
+            )
+        })
+        .unwrap_or_default();
     let log = paths.logs.join(format!("{name}.log"));
     Ok(format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- Owned by vanityctl; do not edit. -->\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key><string>dev.vanityctl.{name}</string>\n  <key>ProgramArguments</key>\n  <array>\n{args_xml}\n  </array>\n{working}{env_xml}{scheduling}  <key>StandardOutPath</key><string>{log}</string>\n  <key>StandardErrorPath</key><string>{log}</string>\n</dict>\n</plist>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- Owned by vanityctl; do not edit. -->\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key><string>dev.vanityctl.{name}</string>\n  <key>ProgramArguments</key>\n  <array>\n{args_xml}\n  </array>\n{working}{env_xml}{scheduling}{throttle}{process_type}{low_priority_io}{resource_limits}  <key>StandardOutPath</key><string>{log}</string>\n  <key>StandardErrorPath</key><string>{log}</string>\n</dict>\n</plist>\n",
         log = xml_escape(&log.display().to_string())
     ))
 }

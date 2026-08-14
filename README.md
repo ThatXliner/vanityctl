@@ -218,6 +218,9 @@ local-llm:
   command: ./serve.sh
   args: ["--port", "11434"]
   restart: always
+  throttle_interval: 30
+  process_type: background
+  env_file: ~/.config/vanityctl/secrets/local-llm.env
 ```
 
 On macOS, `apply` generates an owned `dev.vanityctl.<name>` plist beneath
@@ -227,6 +230,9 @@ to overwrite a generated-path file that lacks its ownership marker.
 
 `command` is executed directly, not via an implicit shell. Use an explicit script
 or `/bin/sh` plus arguments if shell behavior is actually needed.
+Native `env_file` inputs must be private (`chmod 600`). Optional launchd tuning also
+includes `run_at_load`, `restart: on-failure`, `low_priority_io`, and
+`resource_limits.open_files`.
 
 Existing user LaunchAgents require an explicit, dry-run-first ownership handoff:
 
@@ -246,6 +252,7 @@ scraper:
   directory: ~/services/scraper
   command: ./scrape.sh
   schedule: "0 4 * * *"
+  run_at_load: true # run at login, then follow the schedule
 ```
 
 V0 compiles exact daily times (`0 4 * * *`) and minute intervals
@@ -315,14 +322,15 @@ implemented.
 
 ## DNS integration
 
-Cloudflare credentials are referenced by environment variable and never returned by
-`describe`, JSON status, or the dashboard:
+Cloudflare credentials are referenced by a private file (recommended for `hostd`)
+or an environment variable and never returned by `describe`, JSON status, or the
+dashboard:
 
 ```yaml
 dns:
   provider: cloudflare
   zone_id: your-cloudflare-zone-id
-  token_env: CLOUDFLARE_API_TOKEN
+  token_file: ~/.config/vanityctl/cloudflare-token
   interval: 5m
   records:
     - name: billion.example.com
@@ -342,6 +350,10 @@ with provider state, and writes only drifted records. `hostd` repeats reconcilia
 at `dns.interval`, while the CLI action forces an immediate check. Registrar operations,
 email DNS, DNSSEC, nameserver migration, and general Cloudflare administration are
 out of scope.
+
+DNS desired state and reconciliation remain part of the control plane. Providers
+are adapters, so another provider can be added without turning dynamic DNS into a
+generated shell job.
 
 ## CLI and API
 
@@ -427,8 +439,9 @@ Use `vanityctl status`, `logs`, `restart`, and `deploy` for operations.
   cause, and explicitly run `vanityctl deploy <name> --retry`.
 - **Config reports an unknown field:** correct the spelling. Strict schema errors are
   intentional.
-- **DNS credential missing:** export the variable named by `dns.token_env` in the
-  `hostd` environment; the value belongs outside version control.
+- **DNS credential missing:** use a mode-`600` `dns.token_file`, or export the
+  variable named by `dns.token_env` in the `hostd` environment. The value belongs
+  outside version control.
 
 ## Project status and limitations
 

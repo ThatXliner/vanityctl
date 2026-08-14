@@ -53,3 +53,58 @@ fn rejects_unsupported_cron_without_writing_resources() {
             .contains("V0 launchd schedules")
     );
 }
+
+#[test]
+fn preserves_advanced_launchd_process_semantics() {
+    let dir = tempdir().unwrap();
+    let paths = ConfigPaths::from_root(dir.path());
+    let process = service(
+        r#"type: process
+command: /usr/local/bin/worker
+restart: on-failure
+run_at_load: false
+throttle_interval: 30
+process_type: background
+low_priority_io: true
+resource_limits:
+  open_files: 8192
+"#,
+    );
+    let plist = render_launchd_plist("worker", &process, &paths).unwrap();
+    assert!(plist.contains("<key>RunAtLoad</key><false/>"));
+    assert!(plist.contains("<key>SuccessfulExit</key><false/>"));
+    assert!(plist.contains("<key>ThrottleInterval</key><integer>30</integer>"));
+    assert!(plist.contains("<key>ProcessType</key><string>Background</string>"));
+    assert!(plist.contains("<key>LowPriorityIO</key><true/>"));
+    assert!(plist.contains("<key>NumberOfFiles</key><integer>8192</integer>"));
+}
+
+#[test]
+fn jobs_can_run_at_load_and_then_follow_their_schedule() {
+    let dir = tempdir().unwrap();
+    let paths = ConfigPaths::from_root(dir.path());
+    let job =
+        service("type: job\ncommand: /bin/true\nschedule: '*/15 * * * *'\nrun_at_load: true\n");
+    let plist = render_launchd_plist("ddns", &job, &paths).unwrap();
+    assert!(plist.contains("<key>RunAtLoad</key><true/>"));
+    assert!(plist.contains("<key>StartInterval</key><integer>900</integer>"));
+}
+
+#[test]
+fn native_env_files_are_loaded_without_copying_secrets_into_plists() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let paths = ConfigPaths::from_root(dir.path());
+    let env_file = dir.path().join("worker.env");
+    fs::write(&env_file, "API_TOKEN=top-secret\n").unwrap();
+    fs::set_permissions(&env_file, fs::Permissions::from_mode(0o600)).unwrap();
+    let process = service(&format!(
+        "type: process\ncommand: /usr/local/bin/worker\nenv_file: {}\n",
+        env_file.display()
+    ));
+    let plist = render_launchd_plist("worker", &process, &paths).unwrap();
+    assert!(plist.contains("set -a; . &quot;$1&quot;; shift; exec &quot;$@&quot;"));
+    assert!(plist.contains(&env_file.display().to_string()));
+    assert!(!plist.contains("top-secret"));
+}

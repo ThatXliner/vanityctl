@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
+    config::read_private_file,
     model::{DnsConfig, DnsRecordConfig, DnsRecordType},
     state::StateStore,
 };
@@ -47,15 +48,22 @@ pub struct CloudflareProvider {
 }
 impl CloudflareProvider {
     pub fn from_config(config: &DnsConfig) -> Result<Self> {
+        let token = match (&config.token_env, &config.token_file) {
+            (Some(name), None) => env::var(name).with_context(|| {
+                format!("DNS credential environment variable {name} is not set")
+            })?,
+            (None, Some(path)) => read_private_file(path, "DNS token_file")?,
+            (Some(_), Some(_)) => bail!("dns may set either token_env or token_file, not both"),
+            (None, None) => bail!("dns requires token_env or token_file"),
+        };
+        let token = token.trim().to_owned();
+        if token.is_empty() {
+            bail!("DNS credential is empty");
+        }
         Ok(Self {
             client: Client::new(),
             zone_id: config.zone_id.clone(),
-            token: env::var(&config.token_env).with_context(|| {
-                format!(
-                    "DNS credential environment variable {} is not set",
-                    config.token_env
-                )
-            })?,
+            token,
         })
     }
 }

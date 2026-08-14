@@ -62,3 +62,8 @@ Command execution
 is injected, which lets tests validate dispatch and generated commands without
 touching real Docker or launchd resources. Deployment and DNS are coordinators above
 the workload backends; neither is encoded as a special Docker behavior.
+
+DNS is intentionally not a declarative workload plugin: it owns machine-wide
+desired state, drift detection, API/UI status, and continuous reconciliation.
+Provider implementations are the extension boundary. This keeps Cloudflare
+replaceable without degrading DNS into a generated scheduled script.

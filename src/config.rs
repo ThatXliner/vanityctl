@@ -220,6 +220,29 @@ impl HostConfig {
             if svc.kind != ServiceType::Job && svc.schedule.is_some() {
                 bail!("service {name}: schedule is only valid for jobs");
             }
+            if svc.kind == ServiceType::Job
+                && !matches!(svc.restart, crate::model::RestartPolicy::No)
+            {
+                bail!("service {name}: scheduled jobs cannot set restart");
+            }
+            if svc.throttle_interval == Some(0) {
+                bail!("service {name}: throttle_interval must be greater than zero");
+            }
+            let has_launchd_options = svc.run_at_load.is_some()
+                || svc.throttle_interval.is_some()
+                || svc.process_type.is_some()
+                || svc.low_priority_io.is_some()
+                || svc.resource_limits.is_some();
+            if !matches!(svc.kind, ServiceType::Process | ServiceType::Job) && has_launchd_options {
+                bail!(
+                    "service {name}: run_at_load, throttle_interval, process_type, low_priority_io, and resource_limits are only valid for process and job services"
+                );
+            }
+            if matches!(svc.kind, ServiceType::Process | ServiceType::Job)
+                && let Some(path) = &svc.env_file
+            {
+                read_private_file(path, &format!("service {name} env_file"))?;
+            }
             if svc.kind != ServiceType::Compose && (svc.file.is_some() || svc.files.is_some()) {
                 bail!("service {name}: file and files are only valid for compose services");
             }
@@ -268,6 +291,16 @@ impl HostConfig {
                 );
             }
             parse_duration(&dns.interval).context("invalid dns.interval")?;
+            match (&dns.token_env, &dns.token_file) {
+                (Some(_), Some(_)) => {
+                    bail!("dns may set either token_env or token_file, not both")
+                }
+                (None, None) => bail!("dns requires token_env or token_file"),
+                (None, Some(path)) => {
+                    read_private_file(path, "DNS token_file")?;
+                }
+                (Some(_), None) => {}
+            }
             let mut names = HashSet::new();
             for record in &dns.records {
                 if !names.insert(&record.name) {
@@ -373,6 +406,27 @@ pub fn expand_path(value: &str) -> Result<PathBuf> {
             .join(rest));
     }
     Ok(Path::new(value).to_path_buf())
+}
+
+pub fn read_private_file(value: &str, purpose: &str) -> Result<String> {
+    let path = expand_path(value)?;
+    let metadata = fs::metadata(&path)
+        .with_context(|| format!("read {purpose} metadata at {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("{purpose} {} is not a regular file", path.display());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.mode() & 0o077 != 0 {
+            bail!(
+                "{purpose} {} must not be readable or writable by group/others; run `chmod 600 {}`",
+                path.display(),
+                path.display()
+            );
+        }
+    }
+    fs::read_to_string(&path).with_context(|| format!("read {purpose} at {}", path.display()))
 }
 
 pub fn parse_duration(value: &str) -> Result<std::time::Duration> {
