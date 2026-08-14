@@ -291,19 +291,31 @@ impl HostConfig {
                 );
             }
             parse_duration(&dns.interval).context("invalid dns.interval")?;
-            match (&dns.token_env, &dns.token_file) {
-                (Some(_), Some(_)) => {
-                    bail!("dns may set either token_env or token_file, not both")
-                }
-                (None, None) => bail!("dns requires token_env or token_file"),
-                (None, Some(path)) => {
-                    read_private_file(path, "DNS token_file")?;
-                }
-                (Some(_), None) => {}
+            let credential_sources = [
+                dns.credentials.is_some(),
+                dns.token_env.is_some(),
+                dns.token_file.is_some(),
+            ]
+            .into_iter()
+            .filter(|configured| *configured)
+            .count();
+            if credential_sources != 1 {
+                bail!(
+                    "dns requires exactly one credential source: credentials, token_env, or token_file"
+                );
+            }
+            if let Some(path) = dns.credentials.as_ref().or(dns.token_file.as_ref()) {
+                read_private_file(path, "DNS credentials")?;
+            }
+            if dns.dynamic.is_empty() && dns.records.is_empty() {
+                bail!("dns requires at least one dynamic hostname or record");
             }
             let mut names = HashSet::new();
-            for record in &dns.records {
-                if !names.insert(&record.name) {
+            for record in dns.effective_records() {
+                if record.name.trim().is_empty() || !record.name.contains('.') {
+                    bail!("DNS record names must be fully qualified hostnames");
+                }
+                if !names.insert(record.name.clone()) {
                     bail!("duplicate DNS record {}", record.name);
                 }
             }

@@ -329,14 +329,10 @@ dashboard:
 ```yaml
 dns:
   provider: cloudflare
-  zone_id: your-cloudflare-zone-id
-  token_file: ~/.config/vanityctl/cloudflare-token
-  interval: 5m
-  records:
-    - name: billion.example.com
-      type: A
-      value: public_ip
-      proxied: true
+  credentials: ~/.config/vanityctl/cloudflare-token
+  dynamic:
+    - billion.example.com
+    - mc.example.com
 ```
 
 ```console
@@ -345,11 +341,16 @@ vanityctl dns records --json
 vanityctl dns reconcile
 ```
 
+Each `dynamic` hostname means an unproxied `A` record following this machine's
+public IPv4 address. vanityctl discovers the matching Cloudflare zone and uses a
+five-minute interval by default. The expanded `zone_id`, `token_file`/`token_env`,
+`interval`, and `records` form remains available for uncommon record types and
+provider settings.
+
 The reconciler resolves the public IP only when checking, compares desired records
-with provider state, and writes only drifted records. `hostd` repeats reconciliation
-at `dns.interval`, while the CLI action forces an immediate check. Registrar operations,
-email DNS, DNSSEC, nameserver migration, and general Cloudflare administration are
-out of scope.
+with provider state, and writes only drifted records. Registrar operations, email
+DNS, DNSSEC, nameserver migration, and general Cloudflare administration are out of
+scope.
 
 DNS desired state and reconciliation remain part of the control plane. Providers
 are adapters, so another provider can be added without turning dynamic DNS into a

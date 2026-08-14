@@ -176,7 +176,7 @@ fn dns_accepts_a_private_token_file() {
     fs::write(
         &paths.config,
         format!(
-            "version: 1\ndns:\n  provider: cloudflare\n  zone_id: zone\n  token_file: {}\nservices: {{}}\n",
+            "version: 1\ndns:\n  provider: cloudflare\n  zone_id: zone\n  token_file: {}\n  dynamic: [app.example.com]\nservices: {{}}\n",
             token.display()
         ),
     )
@@ -193,11 +193,11 @@ fn dns_rejects_ambiguous_missing_and_public_token_files() {
     fs::set_permissions(&public_token, fs::Permissions::from_mode(0o644)).unwrap();
 
     for (index, credentials, expected) in [
-        (0, String::new(), "requires token_env or token_file"),
+        (0, String::new(), "exactly one credential source"),
         (
             1,
             "  token_env: CLOUDFLARE_API_TOKEN\n  token_file: /tmp/token\n".into(),
-            "either token_env or token_file",
+            "exactly one credential source",
         ),
         (
             2,
@@ -210,7 +210,7 @@ fn dns_rejects_ambiguous_missing_and_public_token_files() {
         fs::write(
             &paths.config,
             format!(
-                "version: 1\ndns:\n  provider: cloudflare\n  zone_id: zone\n{credentials}services: {{}}\n"
+                "version: 1\ndns:\n  provider: cloudflare\n  zone_id: zone\n{credentials}  dynamic: [app.example.com]\nservices: {{}}\n"
             ),
         )
         .unwrap();
@@ -220,6 +220,32 @@ fn dns_rejects_ambiguous_missing_and_public_token_files() {
             "expected {expected:?} in {error:?}"
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn concise_dns_expands_dynamic_hostnames_with_safe_defaults() {
+    let dir = tempdir().unwrap();
+    let paths = ConfigPaths::from_root(dir.path());
+    let token = dir.path().join("cloudflare-token");
+    fs::write(&token, "secret-token\n").unwrap();
+    fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(
+        &paths.config,
+        format!(
+            "version: 1\ndns:\n  provider: cloudflare\n  credentials: {}\n  dynamic:\n    - mc.example.com\n    - rustdesk.example.com\nservices: {{}}\n",
+            token.display()
+        ),
+    )
+    .unwrap();
+    let config = HostConfig::load(&paths).unwrap();
+    let dns = config.dns.unwrap();
+    assert!(dns.zone_id.is_none());
+    let records = dns.effective_records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].name, "mc.example.com");
+    assert_eq!(records[0].value, "public_ip");
+    assert!(!records[0].proxied);
 }
 
 #[cfg(unix)]

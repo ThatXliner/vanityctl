@@ -47,22 +47,31 @@ pub struct CloudflareProvider {
     token: String,
 }
 impl CloudflareProvider {
-    pub fn from_config(config: &DnsConfig) -> Result<Self> {
-        let token = match (&config.token_env, &config.token_file) {
-            (Some(name), None) => env::var(name).with_context(|| {
+    pub async fn from_config(config: &DnsConfig) -> Result<Self> {
+        let token = match (&config.credentials, &config.token_env, &config.token_file) {
+            (Some(path), None, None) | (None, None, Some(path)) => {
+                read_private_file(path, "DNS credentials")?
+            }
+            (None, Some(name), None) => env::var(name).with_context(|| {
                 format!("DNS credential environment variable {name} is not set")
             })?,
-            (None, Some(path)) => read_private_file(path, "DNS token_file")?,
-            (Some(_), Some(_)) => bail!("dns may set either token_env or token_file, not both"),
-            (None, None) => bail!("dns requires token_env or token_file"),
+            _ => bail!(
+                "dns requires exactly one credential source: credentials, token_env, or token_file"
+            ),
         };
         let token = token.trim().to_owned();
         if token.is_empty() {
             bail!("DNS credential is empty");
         }
+        let client = Client::new();
+        let zone_id = if let Some(zone_id) = &config.zone_id {
+            zone_id.clone()
+        } else {
+            discover_zone(&client, &token, &config.effective_records()).await?
+        };
         Ok(Self {
-            client: Client::new(),
-            zone_id: config.zone_id.clone(),
+            client,
+            zone_id,
             token,
         })
     }
@@ -82,6 +91,58 @@ struct CfRecord {
     content: String,
     #[serde(rename = "type")]
     kind: String,
+}
+
+#[derive(Deserialize)]
+struct CfZone {
+    id: String,
+    name: String,
+}
+
+async fn discover_zone(
+    client: &Client,
+    token: &str,
+    records: &[DnsRecordConfig],
+) -> Result<String> {
+    let response: CfResponse<Vec<CfZone>> = client
+        .get("https://api.cloudflare.com/client/v4/zones?per_page=50")
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    if !response.success {
+        bail!(
+            "Cloudflare API error while discovering zone: {:?}",
+            response.errors
+        );
+    }
+    select_zone(&response.result, records)
+}
+
+fn select_zone(zones: &[CfZone], records: &[DnsRecordConfig]) -> Result<String> {
+    let mut selected: Option<&CfZone> = None;
+    for record in records {
+        let zone = zones
+            .iter()
+            .filter(|zone| {
+                record.name == zone.name || record.name.ends_with(&format!(".{}", zone.name))
+            })
+            .max_by_key(|zone| zone.name.len())
+            .with_context(|| format!("no accessible Cloudflare zone contains {}", record.name))?;
+        if let Some(existing) = selected
+            && existing.id != zone.id
+        {
+            bail!(
+                "configured DNS records span multiple Cloudflare zones; split them into separate host configurations or set one zone_id"
+            );
+        }
+        selected = Some(zone);
+    }
+    selected
+        .map(|zone| zone.id.clone())
+        .context("dns requires at least one dynamic hostname or record")
 }
 
 #[async_trait]
@@ -164,11 +225,11 @@ impl DnsReconciler {
             .to_owned())
     }
     pub async fn status(&self, config: &DnsConfig) -> Result<DnsStatus> {
-        let provider = CloudflareProvider::from_config(config)?;
+        let provider = CloudflareProvider::from_config(config).await?;
         self.status_with(config, &provider).await
     }
     pub async fn reconcile(&self, config: &DnsConfig) -> Result<DnsStatus> {
-        let provider = CloudflareProvider::from_config(config)?;
+        let provider = CloudflareProvider::from_config(config).await?;
         self.reconcile_with(config, &provider).await
     }
     async fn status_with(
@@ -180,7 +241,7 @@ impl DnsReconciler {
         let existing = provider.records().await?;
         let snapshot = self.state.snapshot();
         let records = config
-            .records
+            .effective_records()
             .iter()
             .map(|record| {
                 let desired = desired_value(record, &public_ip);
@@ -213,7 +274,8 @@ impl DnsReconciler {
     ) -> Result<DnsStatus> {
         let before = self.status_with(config, provider).await?;
         let mut changed = false;
-        for (record, status) in config.records.iter().zip(&before.records) {
+        let records = config.effective_records();
+        for (record, status) in records.iter().zip(&before.records) {
             if !status.synced {
                 provider.upsert(record, &status.desired).await?;
                 changed = true;
@@ -252,5 +314,60 @@ fn dns_kind(kind: &DnsRecordType) -> &'static str {
         DnsRecordType::A => "A",
         DnsRecordType::Aaaa => "AAAA",
         DnsRecordType::Cname => "CNAME",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(name: &str) -> DnsRecordConfig {
+        DnsRecordConfig {
+            name: name.into(),
+            kind: DnsRecordType::A,
+            value: "public_ip".into(),
+            proxied: false,
+        }
+    }
+
+    #[test]
+    fn zone_discovery_uses_the_longest_matching_accessible_zone() {
+        let zones = vec![
+            CfZone {
+                id: "parent".into(),
+                name: "example.com".into(),
+            },
+            CfZone {
+                id: "child".into(),
+                name: "home.example.com".into(),
+            },
+        ];
+        assert_eq!(
+            select_zone(&zones, &[record("mc.home.example.com")]).unwrap(),
+            "child"
+        );
+    }
+
+    #[test]
+    fn zone_discovery_rejects_records_spanning_zones() {
+        let zones = vec![
+            CfZone {
+                id: "one".into(),
+                name: "one.example".into(),
+            },
+            CfZone {
+                id: "two".into(),
+                name: "two.example".into(),
+            },
+        ];
+        assert!(
+            select_zone(
+                &zones,
+                &[record("app.one.example"), record("app.two.example")]
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("multiple Cloudflare zones")
+        );
     }
 }
