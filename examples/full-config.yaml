@@ -5,17 +5,10 @@ api:
 
 dns:
   provider: cloudflare
-  zone_id: replace-with-cloudflare-zone-id
-  token_env: CLOUDFLARE_API_TOKEN
-  interval: 5m
-  records:
-    - name: billion.example.com
-      type: A
-      value: public_ip
-      proxied: true
-    - name: mc.example.com
-      type: A
-      value: public_ip
+  credentials: ~/.config/vanityctl/cloudflare-token
+  dynamic:
+    - billion.example.com
+    - mc.example.com
 
 services:
   immich:

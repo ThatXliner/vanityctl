@@ -264,15 +264,39 @@ pub struct DnsRecordConfig {
 #[serde(deny_unknown_fields)]
 pub struct DnsConfig {
     pub provider: String,
-    pub zone_id: String,
+    /// Optional provider-specific zone identifier. Omit it to discover the
+    /// Cloudflare zone from the configured record names.
+    #[serde(default)]
+    pub zone_id: Option<String>,
+    /// Concise credential form: path to a private token file.
+    #[serde(default)]
+    pub credentials: Option<String>,
     #[serde(default)]
     pub token_env: Option<String>,
     #[serde(default)]
     pub token_file: Option<String>,
     #[serde(default = "default_dns_interval")]
     pub interval: String,
+    /// Hostnames that should follow this machine's public IPv4 address.
+    #[serde(default)]
+    pub dynamic: Vec<String>,
     #[serde(default)]
     pub records: Vec<DnsRecordConfig>,
+}
+
+impl DnsConfig {
+    pub fn effective_records(&self) -> Vec<DnsRecordConfig> {
+        self.dynamic
+            .iter()
+            .map(|name| DnsRecordConfig {
+                name: name.clone(),
+                kind: DnsRecordType::A,
+                value: "public_ip".into(),
+                proxied: false,
+            })
+            .chain(self.records.iter().cloned())
+            .collect()
+    }
 }
 
 fn default_dns_interval() -> String {
