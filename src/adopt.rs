@@ -1,6 +1,9 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    fs::OpenOptions,
+    io::Write,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -11,7 +14,7 @@ use serde::Serialize;
 use crate::{
     backend::render_launchd_plist,
     config::{ConfigPaths, HostConfig},
-    model::{RestartPolicy, Service, ServiceType},
+    model::{ProcessType, ResourceLimits, RestartPolicy, Service, ServiceType},
     runner::SharedRunner,
 };
 
@@ -27,6 +30,7 @@ pub struct AdoptionResult {
     pub archived_plist: PathBuf,
     pub service_file: PathBuf,
     pub managed_plist: PathBuf,
+    pub environment_file: Option<PathBuf>,
     pub service_type: ServiceType,
     pub command: String,
     pub arguments: Vec<String>,
@@ -52,7 +56,7 @@ impl AdoptionResult {
             format!("{} (values redacted)", self.environment_names.join(", "))
         };
         format!(
-            "launchd adoption {}\n\nLabel:       {}\nService:     {} ({:?})\nCommand:     {}\nArguments:   {}\nDirectory:   {}\nEnvironment: {}\nLoaded:      {}{}\nOld stdout:  {}\nOld stderr:  {}\n\nPlan:\n  1. validate the candidate service and generated plist\n  2. archive {} without overwriting it\n  3. write {} and its owned launchd plist\n  4. unload {} before loading dev.vanityctl.{}\n  5. restore and reload the original automatically if bootstrap fails\n\n{}",
+            "launchd adoption {}\n\nLabel:       {}\nService:     {} ({:?})\nCommand:     {}\nArguments:   {}\nDirectory:   {}\nEnvironment: {}\nSecret file: {}\nLoaded:      {}{}\nOld stdout:  {}\nOld stderr:  {}\n\nPlan:\n  1. validate the candidate service and generated plist\n  2. archive {} without overwriting it\n  3. write {} and its owned launchd plist{}\n  4. unload {} before loading dev.vanityctl.{}\n  5. restore and reload the original automatically if bootstrap fails\n\n{}",
             self.action,
             self.label,
             self.service,
@@ -61,6 +65,11 @@ impl AdoptionResult {
             args,
             self.working_directory.as_deref().unwrap_or("—"),
             env,
+            self.environment_file
+                .as_deref()
+                .map(|path| path.to_string_lossy())
+                .as_deref()
+                .unwrap_or("—"),
             self.currently_loaded,
             self.current_pid
                 .map(|pid| format!(" (pid {pid})"))
@@ -69,6 +78,11 @@ impl AdoptionResult {
             self.original_stderr.as_deref().unwrap_or("—"),
             self.source_plist.display(),
             self.service_file.display(),
+            if self.environment_file.is_some() {
+                " plus a private environment file"
+            } else {
+                ""
+            },
             self.label,
             self.service,
             if self.action == "planned" {
@@ -127,7 +141,7 @@ impl LaunchdAdopter {
                 source.display()
             );
         }
-        let parsed = ParsedAgent::read(&source, label)?;
+        let mut parsed = ParsedAgent::read(&source, label)?;
         let config = HostConfig::load(&self.paths)?;
         if config.services.contains_key(service_name) {
             bail!("service {service_name:?} already exists; refusing to overwrite it");
@@ -153,6 +167,20 @@ impl LaunchdAdopter {
             bail!("managed plist already exists at {}", managed.display());
         }
 
+        let environment_file = (!parsed.environment.is_empty()).then(|| {
+            self.home
+                .join(".config/vanityctl/secrets")
+                .join(format!("{service_name}.env"))
+        });
+        if let Some(path) = &environment_file
+            && path.exists()
+        {
+            bail!(
+                "refusing to overwrite existing private environment file at {}",
+                path.display()
+            );
+        }
+
         // Validate the imported definition and generated launchd representation before mutation.
         let mut candidate_config = config;
         candidate_config
@@ -161,6 +189,9 @@ impl LaunchdAdopter {
         candidate_config
             .validate()
             .context("candidate service is invalid")?;
+        parsed.service.env_file = environment_file
+            .as_ref()
+            .map(|path| path.display().to_string());
         let managed_body = render_launchd_plist(service_name, &parsed.service, &self.paths)
             .context("candidate cannot be represented by vanityctl launchd backend")?;
         let service_body = render_service_fragment(service_name, &parsed.service, label)?;
@@ -180,6 +211,7 @@ impl LaunchdAdopter {
             archived_plist: archive.clone(),
             service_file: service_file.clone(),
             managed_plist: managed.clone(),
+            environment_file: environment_file.clone(),
             service_type: parsed.service.kind.clone(),
             command: parsed.service.command.clone().unwrap_or_default(),
             arguments: parsed.service.args.clone(),
@@ -204,23 +236,45 @@ impl LaunchdAdopter {
         fs::create_dir_all(archive.parent().unwrap())?;
         fs::create_dir_all(service_file.parent().unwrap())?;
         fs::create_dir_all(managed.parent().unwrap())?;
+        if let Some(path) = &environment_file {
+            fs::create_dir_all(path.parent().unwrap())?;
+        }
         let service_tmp = temporary_path(&service_file);
         let managed_tmp = temporary_path(&managed);
         fs::write(&service_tmp, service_body)?;
         fs::write(&managed_tmp, managed_body)?;
+        let environment_tmp = environment_file.as_ref().map(|path| temporary_path(path));
+        if let Some(path) = &environment_tmp {
+            write_private_environment(path, &parsed.environment)?;
+        }
 
         // Moving first prevents the original from being automatically loaded again next login.
         fs::rename(&source, &archive).context("archive original plist")?;
-        if let Err(error) =
-            fs::rename(&service_tmp, &service_file).and_then(|_| fs::rename(&managed_tmp, &managed))
+        if !parsed.environment.is_empty()
+            && let Err(error) = fs::set_permissions(&archive, fs::Permissions::from_mode(0o600))
         {
             rollback_files(
                 &source,
                 &archive,
-                &service_file,
-                &managed,
-                &service_tmp,
-                &managed_tmp,
+                [&service_file, &managed, &service_tmp, &managed_tmp],
+                [environment_file.as_deref(), environment_tmp.as_deref()],
+            );
+            return Err(error).context("protect archived plist; original restored");
+        }
+        if let Err(error) = fs::rename(&service_tmp, &service_file)
+            .and_then(|_| fs::rename(&managed_tmp, &managed))
+            .and_then(|_| {
+                if let (Some(tmp), Some(target)) = (&environment_tmp, &environment_file) {
+                    fs::rename(tmp, target)?;
+                }
+                Ok(())
+            })
+        {
+            rollback_files(
+                &source,
+                &archive,
+                [&service_file, &managed, &service_tmp, &managed_tmp],
+                [environment_file.as_deref(), environment_tmp.as_deref()],
             );
             return Err(error).context("install candidate files; original plist restored");
         }
@@ -232,10 +286,8 @@ impl LaunchdAdopter {
             rollback_files(
                 &source,
                 &archive,
-                &service_file,
-                &managed,
-                &service_tmp,
-                &managed_tmp,
+                [&service_file, &managed, &service_tmp, &managed_tmp],
+                [environment_file.as_deref(), environment_tmp.as_deref()],
             );
             return Err(error)
                 .context("unload original; its plist was restored and remained loaded");
@@ -258,10 +310,8 @@ impl LaunchdAdopter {
             rollback_files(
                 &source,
                 &archive,
-                &service_file,
-                &managed,
-                &service_tmp,
-                &managed_tmp,
+                [&service_file, &managed, &service_tmp, &managed_tmp],
+                [environment_file.as_deref(), environment_tmp.as_deref()],
             );
             let restore = self.runner.run(
                 "launchctl",
@@ -302,15 +352,15 @@ fn temporary_path(path: &Path) -> PathBuf {
 fn rollback_files(
     source: &Path,
     archive: &Path,
-    service: &Path,
-    managed: &Path,
-    service_tmp: &Path,
-    managed_tmp: &Path,
+    artifacts: [&Path; 4],
+    optional_artifacts: [Option<&Path>; 2],
 ) {
-    fs::remove_file(service).ok();
-    fs::remove_file(managed).ok();
-    fs::remove_file(service_tmp).ok();
-    fs::remove_file(managed_tmp).ok();
+    for path in artifacts {
+        fs::remove_file(path).ok();
+    }
+    for path in optional_artifacts.into_iter().flatten() {
+        fs::remove_file(path).ok();
+    }
     if archive.exists() && !source.exists() {
         fs::rename(archive, source).ok();
     }
@@ -344,6 +394,7 @@ fn render_service_fragment(name: &str, service: &Service, source_label: &str) ->
 struct ParsedAgent {
     service: Service,
     environment_names: Vec<String>,
+    environment: BTreeMap<String, String>,
     original_stdout: Option<String>,
     original_stderr: Option<String>,
 }
@@ -373,7 +424,7 @@ impl ParsedAgent {
             (None, Some(mut values)) if !values.is_empty() => (values.remove(0), values),
             _ => bail!("exactly one of Program or non-empty ProgramArguments is required"),
         };
-        let keep_alive = boolean(dict, "KeepAlive")?.unwrap_or(false);
+        let restart = parse_keep_alive(dict)?;
         let run_at_load = boolean(dict, "RunAtLoad")?.unwrap_or(false);
         let interval = integer(dict, "StartInterval")?;
         let calendar = dict.get("StartCalendarInterval");
@@ -391,25 +442,24 @@ impl ParsedAgent {
             None
         };
         let kind = if schedule.is_some() {
-            if keep_alive || run_at_load {
-                bail!(
-                    "scheduled agents with KeepAlive or RunAtLoad cannot be represented faithfully"
-                );
+            if restart != RestartPolicy::No {
+                bail!("scheduled agents with KeepAlive cannot be represented faithfully");
             }
             ServiceType::Job
         } else {
-            if !run_at_load && !keep_alive {
+            if !run_at_load && restart == RestartPolicy::No {
                 bail!("on-demand agent has neither a supported schedule, RunAtLoad, nor KeepAlive");
             }
             ServiceType::Process
         };
-        let environment_names = environment_names(dict)?;
-        if !environment_names.is_empty() {
-            bail!(
-                "EnvironmentVariables detected ({}) but values cannot be imported without putting secrets in declarative config; move them to env_file and adopt manually",
-                environment_names.join(", ")
-            );
-        }
+        let environment = environment(dict)?;
+        let environment_names = environment.keys().cloned().collect();
+        let throttle_interval = positive_integer(dict, "ThrottleInterval")?;
+        let process_type = string(dict, "ProcessType")?
+            .map(|value| parse_process_type(&value))
+            .transpose()?;
+        let low_priority_io = boolean(dict, "LowPriorityIO")?;
+        let resource_limits = parse_resource_limits(dict)?;
         Ok(Self {
             service: Service {
                 kind,
@@ -426,11 +476,12 @@ impl ParsedAgent {
                 volumes: Vec::new(),
                 environment: BTreeMap::new(),
                 env_file: None,
-                restart: if keep_alive {
-                    RestartPolicy::Always
-                } else {
-                    RestartPolicy::No
-                },
+                restart,
+                run_at_load: Some(run_at_load),
+                throttle_interval,
+                process_type,
+                low_priority_io,
+                resource_limits,
                 schedule,
                 source: None,
                 deploy: None,
@@ -441,6 +492,7 @@ impl ParsedAgent {
                 generated_by: None,
             },
             environment_names,
+            environment,
             original_stdout: string(dict, "StandardOutPath")?,
             original_stderr: string(dict, "StandardErrorPath")?,
         })
@@ -460,6 +512,10 @@ fn reject_unsupported(dict: &Dictionary) -> Result<()> {
         "EnvironmentVariables",
         "StandardOutPath",
         "StandardErrorPath",
+        "ThrottleInterval",
+        "ProcessType",
+        "LowPriorityIO",
+        "SoftResourceLimits",
     ]
     .into_iter()
     .collect();
@@ -526,19 +582,120 @@ fn string_array(dict: &Dictionary, key: &str) -> Result<Option<Vec<String>>> {
         .transpose()
 }
 
-fn environment_names(dict: &Dictionary) -> Result<Vec<String>> {
+fn environment(dict: &Dictionary) -> Result<BTreeMap<String, String>> {
     let Some(value) = dict.get("EnvironmentVariables") else {
-        return Ok(Vec::new());
+        return Ok(BTreeMap::new());
     };
     let environment = value
         .as_dictionary()
         .context("EnvironmentVariables must be a dictionary")?;
-    for value in environment.values() {
-        if value.as_string().is_none() {
-            bail!("EnvironmentVariables values must be strings");
-        }
+    environment
+        .iter()
+        .map(|(key, value)| {
+            if !valid_environment_name(key) {
+                bail!("EnvironmentVariables contains invalid shell variable name {key:?}");
+            }
+            Ok((
+                key.clone(),
+                value
+                    .as_string()
+                    .context("EnvironmentVariables values must be strings")?
+                    .to_owned(),
+            ))
+        })
+        .collect()
+}
+
+fn parse_keep_alive(dict: &Dictionary) -> Result<RestartPolicy> {
+    let Some(value) = dict.get("KeepAlive") else {
+        return Ok(RestartPolicy::No);
+    };
+    if let Some(enabled) = value.as_boolean() {
+        return Ok(if enabled {
+            RestartPolicy::Always
+        } else {
+            RestartPolicy::No
+        });
     }
-    Ok(environment.keys().cloned().collect())
+    let keep_alive = value
+        .as_dictionary()
+        .context("KeepAlive must be a boolean or a supported dictionary")?;
+    if keep_alive.len() == 1
+        && keep_alive.get("SuccessfulExit").and_then(Value::as_boolean) == Some(false)
+    {
+        return Ok(RestartPolicy::OnFailure);
+    }
+    bail!(
+        "KeepAlive dictionary is not faithfully representable; only SuccessfulExit=false is supported"
+    )
+}
+
+fn positive_integer(dict: &Dictionary, key: &str) -> Result<Option<u64>> {
+    integer(dict, key)?
+        .map(|value| {
+            u64::try_from(value)
+                .ok()
+                .filter(|value| *value > 0)
+                .with_context(|| format!("{key} must be a positive integer"))
+        })
+        .transpose()
+}
+
+fn parse_process_type(value: &str) -> Result<ProcessType> {
+    match value {
+        "Standard" => Ok(ProcessType::Standard),
+        "Background" => Ok(ProcessType::Background),
+        "Interactive" => Ok(ProcessType::Interactive),
+        "Adaptive" => Ok(ProcessType::Adaptive),
+        _ => bail!("unsupported launchd ProcessType {value:?}"),
+    }
+}
+
+fn parse_resource_limits(dict: &Dictionary) -> Result<Option<ResourceLimits>> {
+    let Some(value) = dict.get("SoftResourceLimits") else {
+        return Ok(None);
+    };
+    let limits = value
+        .as_dictionary()
+        .context("SoftResourceLimits must be a dictionary")?;
+    let unsupported: Vec<_> = limits
+        .keys()
+        .filter(|key| key.as_str() != "NumberOfFiles")
+        .cloned()
+        .collect();
+    if !unsupported.is_empty() {
+        bail!(
+            "unsupported SoftResourceLimits keys: {}",
+            unsupported.join(", ")
+        );
+    }
+    let open_files = positive_integer(limits, "NumberOfFiles")?
+        .context("SoftResourceLimits requires NumberOfFiles")?;
+    Ok(Some(ResourceLimits {
+        open_files: Some(open_files),
+    }))
+}
+
+fn valid_environment_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn write_private_environment(path: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("create private environment file {}", path.display()))?;
+    for (name, value) in environment {
+        writeln!(file, "{name}='{}'", value.replace('\'', "'\\''"))?;
+    }
+    file.sync_all()?;
+    Ok(())
 }
 
 fn parse_calendar(value: &Value) -> Result<String> {

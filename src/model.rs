@@ -35,6 +35,33 @@ pub enum RestartPolicy {
     No,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProcessType {
+    Standard,
+    Background,
+    Interactive,
+    Adaptive,
+}
+
+impl ProcessType {
+    pub fn launchd_value(&self) -> &'static str {
+        match self {
+            Self::Standard => "Standard",
+            Self::Background => "Background",
+            Self::Interactive => "Interactive",
+            Self::Adaptive => "Adaptive",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceLimits {
+    #[serde(default)]
+    pub open_files: Option<u64>,
+}
+
 impl RestartPolicy {
     pub fn docker_value(&self) -> &'static str {
         match self {
@@ -162,6 +189,18 @@ pub struct Service {
     pub env_file: Option<String>,
     #[serde(default)]
     pub restart: RestartPolicy,
+    /// Overrides the launchd RunAtLoad default. Processes default to true and
+    /// jobs default to false when omitted.
+    #[serde(default)]
+    pub run_at_load: Option<bool>,
+    #[serde(default)]
+    pub throttle_interval: Option<u64>,
+    #[serde(default)]
+    pub process_type: Option<ProcessType>,
+    #[serde(default)]
+    pub low_priority_io: Option<bool>,
+    #[serde(default)]
+    pub resource_limits: Option<ResourceLimits>,
     #[serde(default)]
     pub schedule: Option<String>,
     #[serde(default)]
@@ -226,7 +265,10 @@ pub struct DnsRecordConfig {
 pub struct DnsConfig {
     pub provider: String,
     pub zone_id: String,
-    pub token_env: String,
+    #[serde(default)]
+    pub token_env: Option<String>,
+    #[serde(default)]
+    pub token_file: Option<String>,
     #[serde(default = "default_dns_interval")]
     pub interval: String,
     #[serde(default)]

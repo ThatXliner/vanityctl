@@ -233,7 +233,7 @@ fn failed_install_rolls_back_files_and_reloads_original() {
 }
 
 #[test]
-fn environment_values_are_never_returned_or_written() {
+fn environment_values_are_redacted_and_dry_run_does_not_write_them() {
     let (dir, paths, runner) = fixture(false);
     let source = dir
         .path()
@@ -249,11 +249,79 @@ fn environment_values_are_never_returned_or_written() {
     fs::write(&source, body).unwrap();
     let adopter =
         LaunchdAdopter::with_environment(paths.clone(), runner, dir.path().join("home"), 501);
-    let error = adopter
+    let plan = adopter
         .adopt("com.example.worker", "worker", false)
-        .unwrap_err();
-    let message = error.to_string();
-    assert!(message.contains("API_TOKEN"));
-    assert!(!message.contains(secret));
+        .unwrap();
+    assert_eq!(plan.environment_names, vec!["API_TOKEN"]);
+    assert!(plan.environment_file.is_some());
+    let serialized = serde_json::to_string(&plan).unwrap();
+    assert!(!serialized.contains(secret));
+    assert!(!plan.environment_file.as_ref().unwrap().exists());
     assert!(!paths.services.join("worker.yaml").exists());
+}
+
+#[test]
+fn execute_moves_environment_to_a_private_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (dir, paths, runner) = fixture(false);
+    let source = dir
+        .path()
+        .join("home/Library/LaunchAgents/com.example.worker.plist");
+    let secret = "quote-' and spaces";
+    let mut body = fs::read_to_string(&source).unwrap();
+    body = body.replace(
+        "</dict></plist>",
+        &format!(
+            "<key>EnvironmentVariables</key><dict><key>API_TOKEN</key><string>{secret}</string></dict></dict></plist>"
+        ),
+    );
+    fs::write(&source, body).unwrap();
+    let adopter =
+        LaunchdAdopter::with_environment(paths.clone(), runner, dir.path().join("home"), 501);
+    let result = adopter.adopt("com.example.worker", "worker", true).unwrap();
+    let env_file = result.environment_file.unwrap();
+    assert_eq!(
+        fs::metadata(&env_file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(
+        fs::read_to_string(&env_file)
+            .unwrap()
+            .contains("API_TOKEN='quote-'\\'' and spaces'")
+    );
+    let service = fs::read_to_string(result.service_file).unwrap();
+    assert!(service.contains("env_file:"));
+    assert!(!service.contains(secret));
+    let managed = fs::read_to_string(result.managed_plist).unwrap();
+    assert!(managed.contains(&env_file.display().to_string()));
+    assert!(!managed.contains(secret));
+}
+
+#[test]
+fn adoption_preserves_supported_launchd_tuning() {
+    let (dir, paths, runner) = fixture(false);
+    let source = dir
+        .path()
+        .join("home/Library/LaunchAgents/com.example.worker.plist");
+    fs::write(
+        &source,
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>Label</key><string>com.example.worker</string>
+<key>Program</key><string>/usr/local/bin/worker</string>
+<key>RunAtLoad</key><false/>
+<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+<key>ThrottleInterval</key><integer>30</integer>
+<key>ProcessType</key><string>Background</string>
+<key>LowPriorityIO</key><true/>
+<key>SoftResourceLimits</key><dict><key>NumberOfFiles</key><integer>4096</integer></dict>
+</dict></plist>"#,
+    )
+    .unwrap();
+    let adopter = LaunchdAdopter::with_environment(paths, runner, dir.path().join("home"), 501);
+    let plan = adopter
+        .adopt("com.example.worker", "worker", false)
+        .unwrap();
+    assert_eq!(plan.service_type, vanityctl::model::ServiceType::Process);
 }
