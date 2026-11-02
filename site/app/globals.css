@@ -19,6 +19,7 @@ code,textarea { font-family:var(--mono); }
 .hero { padding-top:clamp(16px,7vh,120px); }
 h1 { margin-left:-.05em; color:var(--bright); font:600 min(17vw,180px)/.86 var(--mono); letter-spacing:-.065em; }
 .tagline { margin-top:clamp(16px,2.5vw,28px); color:var(--bright); font-size:clamp(21px,3.2vw,38px); font-weight:500; line-height:1.2; letter-spacing:-.025em; }
+.tagline span { white-space:nowrap; }
 .intro { max-width:34em; margin-top:16px; }
 
 /* Copy action, status and the disclosable prompt */
@@ -43,15 +44,29 @@ h1 { margin-left:-.05em; color:var(--bright); font:600 min(17vw,180px)/.86 var(-
 .prompt-text { display:block; width:100%; margin-top:8px; padding:20px; border:0; background:var(--panel); color:var(--text); font-size:14px; line-height:1.65; resize:vertical; field-sizing:content; scrollbar-color:#3a473f transparent; scroll-margin-block:16px; }
 .prompt-text:focus-visible { outline-offset:-2px; }
 
-/* The two short sections */
-.details { display:grid; gap:56px; margin-top:clamp(88px,12vw,160px); }
-.details h2 { margin-bottom:16px; color:var(--bright); font-size:clamp(24px,2.4vw,30px); font-weight:600; line-height:1.2; letter-spacing:-.02em; }
-.details section > * + * { margin-top:14px; }
-.details li + li { margin-top:10px; }
-.details li::before { content:"– " / ""; color:var(--green); }
-.details code { color:var(--bright); font-size:.86em; overflow-wrap:anywhere; }
-.note { color:var(--muted); }
-.links { display:flex; flex-wrap:wrap; gap:0 28px; }
+/* Example session */
+.demo { margin-top:clamp(80px,11vw,144px); }
+.demo h2 { margin-bottom:20px; color:var(--bright); font-size:clamp(22px,2.2vw,28px); font-weight:600; line-height:1.2; letter-spacing:-.02em; }
+.demo-window { border:1px solid #26302a; background:#0b0f0d; }
+.demo-bar { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:0 16px; padding:0 8px 0 0; border-bottom:1px solid #26302a; background:var(--panel); }
+.demo-tabs { display:flex; flex-wrap:wrap; }
+.demo-tabs button { min-height:44px; padding:0 12px; border:0; border-right:1px solid #26302a; border-bottom:2px solid transparent; background:transparent; color:var(--muted); font:14px var(--mono); cursor:pointer; transition:color .15s,background-color .15s; }
+.demo-tabs button:hover { color:var(--bright); }
+.demo-tabs button[aria-selected="true"] { background:#0b0f0d; color:var(--green); border-bottom-color:var(--green); }
+.demo-tabs button:focus-visible { outline-offset:-3px; }
+.demo-label { padding-left:16px; color:var(--muted); font-size:14px; }
+.demo-panel { padding:20px 16px 22px; }
+.demo-panel:focus-visible { outline-offset:-3px; }
+.demo-panel pre { margin:0; color:var(--text); font:14px/1.6 var(--mono); white-space:pre-wrap; overflow-wrap:anywhere; }
+.demo-command { color:var(--bright); }
+.demo-prompt { color:var(--green); }
+.typed { display:inline-block; max-width:calc(100% - 2ch); vertical-align:top; }
+.tok-comment { color:var(--muted); }
+.tok-key { color:#79c8d2; }
+.tok-string { color:var(--text); }
+.tok-literal { color:var(--orange); }
+.cursor { display:inline-block; width:.6em; height:1.1em; margin-left:2px; vertical-align:text-bottom; background:var(--green); }
+.links { display:flex; flex-wrap:wrap; gap:0 28px; margin-top:16px; }
 .links a, .site-footer a { display:inline-flex; align-items:center; min-height:44px; color:var(--green); text-decoration:underline; text-underline-offset:5px; }
 .links a:hover, .site-footer a:hover { text-decoration-thickness:2px; }
 
@@ -62,10 +77,24 @@ h1 { margin-left:-.05em; color:var(--bright); font:600 min(17vw,180px)/.86 var(-
   .button { flex:0 0 auto; }
   .prompt-details summary { min-height:52px; }
 }
-@media (min-width:860px) {
-  .details { grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:64px; }
+@media (min-width:760px) {
+  .demo-tabs button { padding:0 18px; font-size:15px; }
+  .demo-panel { padding:24px 28px 28px; }
+  /* Tall enough for the longest step, so switching tabs does not shift the page. */
+  .demo-panel pre { min-height:calc(12 * 1.6em); }
 }
+
+/* Each step types its command once when shown; no motion when reduced. */
+@media (prefers-reduced-motion:no-preference) {
+  .demo-panel:not([hidden]) .typed { animation:type .7s steps(24,end) backwards; }
+  .demo-panel:not([hidden]) .demo-output { animation:appear .3s .7s backwards; }
+  .cursor { animation:blink 1.2s steps(1) infinite; }
+}
+@keyframes type { from { clip-path:inset(0 100% 0 0); } }
+@keyframes appear { from { opacity:0; } }
+@keyframes blink { 50% { opacity:0; } }
+
 @media (prefers-reduced-motion:reduce) {
-  .button { transition:none; }
+  .button, .demo-tabs button { transition:none; }
   .button:active { transform:none; }
 }
