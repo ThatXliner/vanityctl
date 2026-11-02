@@ -1,5 +1,7 @@
 # Working on vanityctl
 
+For a new host or migration of existing services, start with
+[prompts/install.md](prompts/install.md) and [docs/onboarding.md](docs/onboarding.md).
 For live service operations, read [the operations skill](skills/vanityctl/SKILL.md).
 Use focused context, discovery and targeted lifecycle commands before writing
 host-specific wrappers. Keep private registry contents and chat transcripts out

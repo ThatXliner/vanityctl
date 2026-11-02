@@ -1,10 +1,10 @@
 [package]
 name = "vanityctl"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
-description = "A single-node declarative control plane for self-hosters"
+description = "Agent-managed self-hosted hardware: one registry and CLI for services, jobs, and deployments"
 
 [lib]
 name = "vanityctl"

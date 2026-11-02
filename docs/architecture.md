@@ -1,4 +1,9 @@
-# V0 architecture
+# Architecture for agent-managed hardware
+
+A coding agent handles discovery, planning and ongoing operations using the
+registry and CLI; hostd supplies the deterministic execution path. The
+[onboarding workflow](onboarding.md) turns an existing machine into maintained
+operational knowledge, one supported migration at a time.
 
 `vanityctl` treats the YAML registry as desired state and keeps mutable observations
 under a separate state directory. `hostd` is the only component that talks to

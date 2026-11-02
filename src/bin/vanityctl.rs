@@ -10,7 +10,7 @@ use vanityctl::{ConfigPaths, HostConfig, adopt::LaunchdAdopter, runner::SystemRu
 #[command(
     name = "vanityctl",
     version,
-    about = "One control plane for everything running on this computer",
+    about = "Agent-managed self-hosted hardware",
     arg_required_else_help = true
 )]
 struct Cli {
@@ -38,8 +38,11 @@ enum Command {
     Up {
         service: String,
     },
-    /// Set up hostd and optionally install the Codex operations skill.
+    /// Print agent onboarding instructions or set up hostd and its operations skill.
     Install {
+        /// Print a prompt for your agent to install and onboard existing services; no changes.
+        #[arg(long, conflicts_with_all = ["start", "codex_skill"])]
+        prompt: bool,
         #[arg(long)]
         start: bool,
         #[arg(long)]
@@ -198,7 +201,21 @@ impl Api {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    if let Command::Install { start, codex_skill } = &cli.command {
+    if let Command::Install { prompt: true, .. } = &cli.command {
+        let prompt = include_str!("../../prompts/install.md");
+        if cli.json {
+            print_json(
+                &json!({"prompt":prompt,"source":"https://github.com/ThatXliner/vanityctl/blob/main/prompts/install.md"}),
+            )?;
+        } else {
+            print!("{prompt}");
+        }
+        return Ok(());
+    }
+    if let Command::Install {
+        start, codex_skill, ..
+    } = &cli.command
+    {
         let home = dirs::home_dir().context("cannot determine home directory")?;
         let hostd = std::env::current_exe()?.with_file_name("hostd");
         let codex = std::env::var_os("CODEX_HOME")

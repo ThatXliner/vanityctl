@@ -1,42 +1,52 @@
 # vanityctl
 
-[Website](https://bryanhu.com/vanityctl/) · [Documentation](#quick-start)
+**Agent-managed self-hosted hardware.**
 
-`vanityctl` is a single-node declarative control plane for self-hosters,
-developers, and coding agents such as **Codex**. It is optimized for agents to
-discover and operate services through a small, predictable CLI, with focused
-context and structured JSON output.
+[Website](https://bryanhu.com/vanityctl/) · [Ask your agent to set it up](#installation) · [Onboarding guide](docs/onboarding.md) · [Manual installation](#manual-installation)
 
-It answers one question:
+Give Codex, Claude Code, or your preferred coding agent a durable understanding
+of your self-hosted machine. vanityctl keeps services, startup behavior, deployment
+inputs and operational commands in one declarative registry, with a focused CLI
+and structured JSON that an agent can use directly.
 
-> What should be running on this machine?
+Your agent helps inventory the hardware, bring existing services under management,
+and maintain it across sessions. `hostd` executes the registered operations through
+Docker, Compose, launchd, Git and DNS adapters. The same commands work for a human
+operator. macOS is the native-service target today.
 
-A Docker container, an existing Compose stack, a native daemon, and a scheduled
-script are all services in one YAML registry and all use the same operational
-vocabulary:
+## Installation
 
-```console
-vanityctl status
-vanityctl restart minecraft
-vanityctl deploy billion
-vanityctl run scraper
-vanityctl logs local-llm -f
+**Send this prompt to your coding agent:**
+
+```text
+Help me set up vanityctl on my self-hosted machine and bring my existing
+services into its registry. Read and follow this onboarding prompt:
+https://raw.githubusercontent.com/ThatXliner/vanityctl/main/prompts/install.md
+Use the machine or SSH host I have authorized. Begin with a read-only
+inventory and a concrete migration plan for the services already running.
 ```
 
-This repository is a runnable V0, not a mockup. It includes the `hostd` daemon, the
-`vanityctl` API client, an embedded local dashboard, macOS launchd integration,
-Docker and Compose backends, Git deployment/polling, job history, JSON output, and
-optional Cloudflare DNS reconciliation.
+The [full setup prompt](prompts/install.md) is the canonical onboarding workflow.
+It asks your agent to install the supported tooling, preserve existing services
+and private configuration, migrate gradually, verify application behavior, and
+leave a maintained infrastructure repo for future sessions. It works with an
+existing machine as well as a fresh one; it does not assume a blank server.
 
-## Built for Codex and other coding agents
+Already have the CLI? Print that same prompt without changing the machine:
 
-Give your agent the machine's operational knowledge in a form it can use directly.
-One registry records how services run, where their configuration lives, and which
-backend handles each operation. That knowledge persists across coding sessions,
-reducing repeated host searches, context spent reading deployment files, and
-one-off Docker or launchd scripts.
+```console
+vanityctl install --prompt
+```
 
-An agent can find a workload, get just its context, inspect it, and apply a change:
+Your agent uses the [manual installer](#manual-installation) underneath. Installation
+and migration remain inspectable steps, with existing deployment ownership,
+service-specific rollback and the operator's authorization preserved. Read the
+[onboarding guide](docs/onboarding.md) for supported migration paths and limits.
+
+## The machine knowledge your agent needs
+
+An agent should be able to find a workload, understand its operation, inspect it,
+and apply an intended change:
 
 ```console
 vanityctl discover app --json
@@ -45,22 +55,22 @@ vanityctl status app --json
 vanityctl up app --json
 ```
 
-- **Focused context:** service metadata and exact next-command arrays, including
-  Compose file order and whether Git deployment is configured.
-- **Read-only discovery:** existing Docker/Compose workloads and installed
-  launchd definitions, with their registered service names where known.
-- **Targeted operations:** inspect or reconcile one service, including Compose
-  environment-file changes, through the same CLI used by a human operator.
-- **Reusable Codex skill:** install the operational workflow so agents know to
-  use vanityctl before reconstructing host-specific commands.
+- **Durable operational knowledge:** service definitions, Compose input order,
+  environment-file references, schedules and deployment configuration persist
+  across agent sessions.
+- **Focused context:** compact service metadata and exact next-command arrays
+  reduce repeated host searches and deployment-file reading.
+- **Incremental onboarding:** read-only discovery identifies existing workloads;
+  registration and supported adoption are separate, deliberate migration steps.
+- **One operational vocabulary:** Docker containers, Compose stacks, native
+  processes and scheduled jobs share status, logs and lifecycle commands.
+- **A reusable agent skill:** Codex can discover the workflow before reconstructing
+  host-specific scripts. Other coding agents can read the same instructions.
 
-```console
-vanityctl install --start --codex-skill
-```
-
-See [agent workflows](docs/agent-workflows.md) for examples and
-[AI-agent integration](#ai-agent-integration) for skill setup on a separate coding
-machine and details of the metadata exposed to agents.
+Bring your own agent. vanityctl is a local Rust CLI and execution daemon, with an
+embedded dashboard; it does not require a hosted agent service or an LLM inside
+hostd. See [agent workflows](docs/agent-workflows.md) and
+[AI-agent integration](#ai-agent-integration) for the recurring maintenance loop.
 
 ## Why Rust
 
@@ -106,9 +116,9 @@ Docker Compose, launchd/systemd, CasaOS, Umbrel, Kubernetes, and shell scripts, 
 `hostd` alone performs orchestration. The CLI and dashboard consume its API. See
 [the V0 architecture](docs/architecture.md) for ownership and safety boundaries.
 
-## Installation
+## Manual installation
 
-Requirements for V0:
+Requirements:
 
 - macOS (native processes/jobs use launchd)
 - Rust 1.88 or newer to build from source

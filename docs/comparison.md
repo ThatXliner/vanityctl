@@ -57,7 +57,7 @@ The goal is to represent all of them through one declarative model and one opera
 
 | Tool                  | Best at                                       | Containers | Native processes |     Scheduled jobs | Git auto-deploy | Declarative whole-machine state |        Web UI | Agent-oriented CLI/API |
 | --------------------- | --------------------------------------------- | ---------: | ---------------: | -----------------: | --------------: | ------------------------------: | ------------: | ---------------------: |
-| **vanityctl**         | Single-machine self-hosting control plane     |          ✓ |                ✓ |                  ✓ |               ✓ |                           **✓** |             ✓ |                  **✓** |
+| **vanityctl**         | Agent-managed self-hosted hardware     |          ✓ |                ✓ |                  ✓ |               ✓ |                           **✓** |             ✓ |                  **✓** |
 | **Coolify**           | Self-hosted application PaaS                  |          ✓ |               —* |                  ✓ |               ✓ |                         Partial |             ✓ |                    API |
 | **Portainer**         | Container management                          |          ✓ |                ✗ | Container-oriented |        ✓/GitOps |                               ✗ |             ✓ |                    API |
 | **PM2**               | Application process supervision               |          ✗ |                ✓ |            Limited |         Limited |                               ✗ |       Limited |                    CLI |
@@ -284,7 +284,8 @@ vanityctl logs ddns
 
 `launchd` or `systemd` remains the reliable underlying supervisor.
 
-vanityctl provides the human-facing declarative control plane above it.
+vanityctl provides the declarative control plane that a coding agent or human
+operator uses above it.
 
 ### CasaOS and Umbrel
 
@@ -463,7 +464,10 @@ It is not a replacement init system.
 
 It is not another PaaS.
 
-It is a **single-node declarative control plane for self-hosters and developers**.
+It is infrastructure for **agent-managed self-hosted hardware**: one machine,
+one declarative registry, and an operational vocabulary shared by your coding
+agent and you. Start with the [agent onboarding prompt](../prompts/install.md)
+to inventory and gradually migrate the services already running on the host.
 
 The underlying technologies remain useful:
 

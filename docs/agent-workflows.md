@@ -1,6 +1,8 @@
-# Spend fewer commands finding out how the host works
+# Agent-managed hardware: the maintenance loop
 
-Start with operational metadata instead of searching every application repo.
+For installation or migration of existing services, start with the
+[setup prompt](../prompts/install.md) and [onboarding guide](onboarding.md).
+Once the host is onboarded, use operational metadata for recurring maintenance.
 The CLI uses hostd's registry and the same backend dispatch for each workload.
 
 ## Known service

@@ -1,9 +1,17 @@
 ---
 name: vanityctl
-description: Find, inspect, start, update or troubleshoot services on a host with vanityctl. Use for vanityctl-managed Docker/Compose workloads, native launchd processes, jobs and deployments.
+description: Set up and operate agent-managed self-hosted hardware with vanityctl. Use for vanityctl installation, onboarding existing services, and its Docker/Compose workloads, launchd processes, jobs and deployments.
 ---
 
 <!-- Managed by vanityctl install; edit the canonical skill in the vanityctl repo. -->
+
+For initial setup or migration of existing services, use `vanityctl install
+--prompt` when supported, or read
+https://github.com/ThatXliner/vanityctl/blob/main/prompts/install.md.
+Follow `docs/onboarding.md` in the vanityctl
+checkout, or https://github.com/ThatXliner/vanityctl/blob/main/docs/onboarding.md
+when no checkout is available. Keep inventory, additive registration and actual
+supervisor handoffs distinct; use the operator's existing migration authorization.
 
 Run these commands on the target host (over its existing SSH alias when remote).
 Use the daemon's registry before searching app repos or recreating Docker/launchd

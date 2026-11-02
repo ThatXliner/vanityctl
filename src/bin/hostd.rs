@@ -5,7 +5,11 @@ use clap::Parser;
 use vanityctl::{ConfigPaths, Manager};
 
 #[derive(Parser)]
-#[command(name = "hostd", version, about = "vanityctl control-plane daemon")]
+#[command(
+    name = "hostd",
+    version,
+    about = "Local execution daemon for agent-managed self-hosted hardware"
+)]
 struct Args {
     /// Path to config.yaml (also available as VANITYCTL_CONFIG)
     #[arg(long)]
