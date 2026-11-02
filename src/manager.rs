@@ -20,7 +20,7 @@ use crate::{
     model::{DeploymentRecord, Event, JobRun, RuntimeState, Service, ServiceStatus, ServiceType},
     plugin::{PluginApplication, PluginResolution, application_directory, stdlib_catalog},
     runner::{SharedRunner, SystemRunner},
-    state::StateStore,
+    state::{PersistentState, StateStore},
 };
 
 pub struct Manager {
@@ -110,49 +110,57 @@ impl Manager {
         let snapshot = self.state.snapshot();
         let mut statuses = Vec::new();
         for (name, service) in &config.services {
-            let mut effective = service.clone();
-            if let Some(value) = snapshot.services.get(name).and_then(|s| s.enabled_override) {
-                effective.enabled = value;
-            }
-            let mut status = self
-                .backends
-                .get(&service.kind)
-                .status(name, &effective)
-                .await
-                .unwrap_or_else(|error| {
-                    let mut value = ServiceStatus {
-                        name: name.clone(),
-                        kind: service.kind.clone(),
-                        state: RuntimeState::Unknown,
-                        health: None,
-                        uptime_seconds: None,
-                        cpu_percent: None,
-                        memory_bytes: None,
-                        pid: None,
-                        ports: service.ports.clone(),
-                        details: Some(error.to_string()),
-                        deployment: None,
-                        latest_job: None,
-                    };
-                    value.health = Some("error".into());
-                    value
-                });
-            if let Some(state) = snapshot.services.get(name) {
-                if service.source.is_some() {
-                    status.deployment = Some(state.deployment.clone());
-                }
-                status.latest_job = state.job_runs.last().cloned();
-            }
-            statuses.push(status);
+            statuses.push(self.status_for(name, service, &snapshot).await);
         }
         Ok(statuses)
     }
+
+    async fn status_for(
+        &self,
+        name: &str,
+        service: &Service,
+        snapshot: &PersistentState,
+    ) -> ServiceStatus {
+        let mut effective = service.clone();
+        if let Some(value) = snapshot.services.get(name).and_then(|s| s.enabled_override) {
+            effective.enabled = value;
+        }
+        let mut status = self
+            .backends
+            .get(&service.kind)
+            .status(name, &effective)
+            .await
+            .unwrap_or_else(|error| {
+                let mut value = ServiceStatus {
+                    name: name.to_owned(),
+                    kind: service.kind.clone(),
+                    state: RuntimeState::Unknown,
+                    health: None,
+                    uptime_seconds: None,
+                    cpu_percent: None,
+                    memory_bytes: None,
+                    pid: None,
+                    ports: service.ports.clone(),
+                    details: Some(error.to_string()),
+                    deployment: None,
+                    latest_job: None,
+                };
+                value.health = Some("error".into());
+                value
+            });
+        if let Some(state) = snapshot.services.get(name) {
+            if service.source.is_some() {
+                status.deployment = Some(state.deployment.clone());
+            }
+            status.latest_job = state.job_runs.last().cloned();
+        }
+        status
+    }
     pub async fn status(&self, name: &str) -> Result<ServiceStatus> {
-        self.statuses()
-            .await?
-            .into_iter()
-            .find(|s| s.name == name)
-            .with_context(|| format!("unknown service {name:?}"))
+        let service = self.service(name)?;
+        Ok(self
+            .status_for(name, &service, &self.state.snapshot())
+            .await)
     }
 
     pub async fn apply(&self) -> Result<ApplyResult> {
@@ -485,6 +493,24 @@ impl Manager {
             .event("lifecycle", Some(name), format!("{action} requested"))?;
         Ok(())
     }
+    /// Reconcile only this service. Compose must re-read .env and env_file inputs.
+    pub async fn up(&self, name: &str) -> Result<()> {
+        let service = self.service(name)?;
+        if let Some(owner) = &service.generated_by {
+            let config = self.config()?;
+            if let Some(application) = config
+                .resolved_plugins
+                .get(&owner.instance)
+                .and_then(|p| p.application.as_ref())
+            {
+                self.materialize_plugin_source(&owner.instance, application)?;
+            }
+        }
+        self.ensure_source(&service)?;
+        self.backends.get(&service.kind).up(name, &service).await?;
+        self.state.event("lifecycle", Some(name), "up completed")?;
+        Ok(())
+    }
     pub async fn logs(&self, name: &str, lines: usize) -> Result<String> {
         let service = self.service(name)?;
         self.backends
@@ -570,6 +596,43 @@ impl Manager {
     }
     pub fn list(&self) -> Result<Vec<Value>> {
         Ok(self.config()?.services.iter().map(|(name, service)| json!({"name":name,"type":service.kind,"enabled":service.enabled,"description":service.description})).collect())
+    }
+
+    pub fn discover(&self, query: Option<&str>) -> Result<crate::discovery::DiscoveryReport> {
+        let home = dirs::home_dir().context("cannot determine home directory")?;
+        let user = home.join("Library/LaunchAgents");
+        let generated = self.paths.generated.join("launchd");
+        Ok(crate::discovery::discover(
+            &self.config()?,
+            self.runner.as_ref(),
+            &[
+                (&user, "user"),
+                (&generated, "user"),
+                (Path::new("/Library/LaunchDaemons"), "system"),
+            ],
+            query,
+        ))
+    }
+
+    pub fn agent_context_data(&self, name: Option<&str>) -> Result<Value> {
+        let config = self.config()?;
+        if let Some(name) = name
+            && !config.services.contains_key(name)
+        {
+            bail!(
+                "unknown service {name:?}; run `vanityctl discover` to find unregistered resources"
+            );
+        }
+        let services: Vec<_> = config.services.iter().filter(|(n, _)| name.is_none_or(|name| name == n.as_str()))
+            .map(|(name, s)| json!({"name":name,"type":s.kind,"description":s.description,
+                "directory":s.directory,"files":if s.kind == ServiceType::Compose {s.compose_files()} else {vec![]},
+                "gitDeployment":s.source.is_some(),"environmentKeys":s.environment.keys().collect::<Vec<_>>(),
+                "commands":{"status":["vanityctl","status",name,"--json"],"up":["vanityctl","up",name],
+                    "logs":["vanityctl","logs",name],"restart":["vanityctl","restart",name]}})).collect();
+        Ok(
+            json!({"schemaVersion":1,"services":services,"config":self.paths.config,
+            "guidance":"Use up SERVICE for initial creation and config/env changes; start only resumes existing resources. Global apply reconciles every configured service. Use discover for unregistered resources; discovery never adopts them."}),
+        )
     }
 
     pub async fn run_job(&self, name: &str) -> Result<JobRun> {

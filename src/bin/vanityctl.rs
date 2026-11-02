@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use reqwest::{Client, Method, Response};
-use serde_json::Value;
+use serde_json::{Value, json};
 use vanityctl::{ConfigPaths, HostConfig, adopt::LaunchdAdopter, runner::SystemRunner};
 
 #[derive(Parser)]
@@ -30,6 +30,21 @@ enum Command {
         command: AdoptCommand,
     },
     List,
+    /// Find existing Docker/Compose and launchd resources without changing ownership.
+    Discover {
+        query: Option<String>,
+    },
+    /// Create or reconcile one service, including Compose environment-file changes.
+    Up {
+        service: String,
+    },
+    /// Set up hostd and optionally install the Codex operations skill.
+    Install {
+        #[arg(long)]
+        start: bool,
+        #[arg(long)]
+        codex_skill: bool,
+    },
     #[command(alias = "ps")]
     Status {
         service: Option<String>,
@@ -95,7 +110,9 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    AgentContext,
+    AgentContext {
+        service: Option<String>,
+    },
     Dns {
         #[command(subcommand)]
         command: Option<DnsCommand>,
@@ -181,6 +198,25 @@ impl Api {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Command::Install { start, codex_skill } = &cli.command {
+        let home = dirs::home_dir().context("cannot determine home directory")?;
+        let hostd = std::env::current_exe()?.with_file_name("hostd");
+        let codex = std::env::var_os("CODEX_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| home.join(".codex"));
+        let report = vanityctl::install::install(
+            &ConfigPaths::discover()?,
+            &home,
+            &hostd,
+            codex_skill
+                .then(|| codex.join("skills/vanityctl/SKILL.md"))
+                .as_deref(),
+            *start,
+            &SystemRunner,
+        )?;
+        output(serde_json::to_value(report)?, cli.json)?;
+        return Ok(());
+    }
     if let Command::Adopt {
         command:
             AdoptCommand::Launchd {
@@ -202,6 +238,12 @@ async fn main() -> Result<()> {
     }
     if matches!(cli.command, Command::Config { .. }) {
         let config = HostConfig::load(&ConfigPaths::discover()?)?;
+        if cli.json {
+            print_json(
+                &json!({"valid":true,"services":config.services.len(),"plugins":config.resolved_plugins.len(),"version":config.version}),
+            )?;
+            return Ok(());
+        }
         println!(
             "configuration valid: {} services, {} plugins (schema v{})",
             config.services.len(),
@@ -212,6 +254,52 @@ async fn main() -> Result<()> {
     }
     let api = Api::discover(cli.api)?;
     match cli.command {
+        Command::Install { .. } => unreachable!(),
+        Command::Discover { query } => {
+            let mut url = reqwest::Url::parse(&format!("{}/api/discovery", api.base))?;
+            if let Some(query) = query {
+                url.query_pairs_mut().append_pair("query", &query);
+            }
+            let path = format!(
+                "{}{}",
+                url.path(),
+                url.query().map(|q| format!("?{q}")).unwrap_or_default()
+            );
+            let value = api.json(Method::GET, &path).await?;
+            if cli.json {
+                print_json(&value)?;
+            } else {
+                println!("TYPE\tRESOURCE\tMANAGED AS\tLOCATION");
+                for row in value["resources"].as_array().unwrap() {
+                    let managed = row["managedAs"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    println!(
+                        "{}\t{}\t{}\t{}",
+                        s(row, "kind"),
+                        s(row, "name"),
+                        if managed.is_empty() {
+                            "unregistered"
+                        } else {
+                            &managed
+                        },
+                        row["directory"]
+                            .as_str()
+                            .or(row["plist"].as_str())
+                            .unwrap_or("—")
+                    );
+                }
+                for warning in value["warnings"].as_array().unwrap() {
+                    eprintln!("{}", warning.as_str().unwrap_or_default());
+                }
+                println!("{}", value["note"].as_str().unwrap_or_default());
+            }
+        }
+        Command::Up { service } => action(&api, &service, "up", cli.json).await?,
         Command::List => {
             let v = api.json(Method::GET, "/api/services").await?;
             if cli.json {
@@ -245,11 +333,11 @@ async fn main() -> Result<()> {
                 .await?,
             cli.json,
         )?,
-        Command::Start { service } => action(&api, &service, "start").await?,
-        Command::Stop { service } => action(&api, &service, "stop").await?,
-        Command::Restart { service } => action(&api, &service, "restart").await?,
-        Command::Pull { service } => action(&api, &service, "pull").await?,
-        Command::Build { service } => action(&api, &service, "build").await?,
+        Command::Start { service } => action(&api, &service, "start", cli.json).await?,
+        Command::Stop { service } => action(&api, &service, "stop", cli.json).await?,
+        Command::Restart { service } => action(&api, &service, "restart", cli.json).await?,
+        Command::Pull { service } => action(&api, &service, "pull", cli.json).await?,
+        Command::Build { service } => action(&api, &service, "build", cli.json).await?,
         Command::Logs {
             service,
             follow,
@@ -309,7 +397,25 @@ async fn main() -> Result<()> {
             println!("disabled {service} (runtime override; apply restores YAML)");
         }
         Command::Doctor => output(api.json(Method::GET, "/api/system").await?, cli.json)?,
-        Command::AgentContext => print!("{}", api.text("/api/agent-context").await?),
+        Command::AgentContext { service } => {
+            let mut url = reqwest::Url::parse(&format!("{}/api/agent-context", api.base))?;
+            if let Some(service) = service {
+                url.query_pairs_mut().append_pair("service", &service);
+            }
+            if cli.json {
+                url.query_pairs_mut().append_pair("format", "json");
+            }
+            let path = format!(
+                "{}{}",
+                url.path(),
+                url.query().map(|q| format!("?{q}")).unwrap_or_default()
+            );
+            if cli.json {
+                print_json(&api.json(Method::GET, &path).await?)?;
+            } else {
+                print!("{}", api.text(&path).await?);
+            }
+        }
         Command::Dns { command } => match command.unwrap_or(DnsCommand::Status) {
             DnsCommand::Status | DnsCommand::Records => {
                 output(api.json(Method::GET, "/api/dns").await?, cli.json)?
@@ -326,10 +432,14 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn action(api: &Api, name: &str, action: &str) -> Result<()> {
+async fn action(api: &Api, name: &str, action: &str, json: bool) -> Result<()> {
     api.json(Method::POST, &format!("/api/services/{name}/{action}"))
         .await?;
-    println!("{action} requested for {name}");
+    if json {
+        print_json(&json!({"ok":true,"service":name,"operation":action}))?;
+    } else {
+        println!("{action} completed for {name}");
+    }
     Ok(())
 }
 async fn deploy_command(

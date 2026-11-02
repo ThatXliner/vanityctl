@@ -42,6 +42,8 @@ pub async fn serve(manager: Arc<Manager>) -> Result<()> {
         .route("/api/services/{name}/status", get(status))
         .route("/api/services/{name}/logs", get(logs))
         .route("/api/services/{name}/start", post(start))
+        .route("/api/services/{name}/up", post(up))
+        .route("/api/discovery", get(discovery))
         .route("/api/services/{name}/stop", post(stop))
         .route("/api/services/{name}/restart", post(restart))
         .route("/api/services/{name}/pull", post(pull))
@@ -174,6 +176,24 @@ impl IntoResponse for ApiError {
 
 async fn list_services(State(s): State<ApiState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!(s.manager.list()?)))
+}
+#[derive(Deserialize)]
+struct DiscoveryQuery {
+    query: Option<String>,
+}
+async fn discovery(
+    State(s): State<ApiState>,
+    Query(q): Query<DiscoveryQuery>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(serde_json::to_value(
+        s.manager.discover(q.query.as_deref())?,
+    )?))
+}
+async fn up(State(s): State<ApiState>, Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
+    s.manager.up(&name).await?;
+    Ok(Json(
+        json!({"ok": true, "service": name, "operation": "up"}),
+    ))
 }
 async fn plugins(State(s): State<ApiState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!(s.manager.plugins()?)))
@@ -357,7 +377,29 @@ async fn system(State(s): State<ApiState>) -> Json<Value> {
 async fn events(State(s): State<ApiState>) -> Json<Value> {
     Json(json!(s.manager.events()))
 }
-async fn agent_context(State(s): State<ApiState>) -> Result<Response, ApiError> {
+#[derive(Deserialize)]
+struct ContextQuery {
+    service: Option<String>,
+    format: Option<String>,
+}
+async fn agent_context(
+    State(s): State<ApiState>,
+    Query(q): Query<ContextQuery>,
+) -> Result<Response, ApiError> {
+    if q.format.as_deref() == Some("json") {
+        return Ok(Json(s.manager.agent_context_data(q.service.as_deref())?).into_response());
+    }
+    if q.service.is_some() {
+        let context = s.manager.agent_context_data(q.service.as_deref())?;
+        return Ok((
+            [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+            format!(
+                "# vanityctl service context\n\n```json\n{}\n```\n",
+                serde_json::to_string_pretty(&context)?
+            ),
+        )
+            .into_response());
+    }
     Ok((
         [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
         s.manager.agent_context()?,
@@ -472,6 +514,8 @@ mod auth_tests {
             ("GET", "/api/services/web"),
             ("GET", "/api/services/web/logs"),
             ("GET", "/api/agent-context"),
+            ("GET", "/api/discovery"),
+            ("POST", "/api/services/web/up"),
             ("POST", "/api/services/web/restart"),
             ("POST", "/api/jobs/backup/run"),
             ("POST", "/api/apply"),

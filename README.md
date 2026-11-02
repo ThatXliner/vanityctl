@@ -73,44 +73,55 @@ Docker Compose, launchd/systemd, CasaOS, Umbrel, Kubernetes, and shell scripts, 
 Requirements for V0:
 
 - macOS (native processes/jobs use launchd)
-- Rust 1.85 or newer to build from source
+- Rust 1.88 or newer to build from source
 - Docker Desktop or another compatible Docker engine for Docker workloads
 - Git for source-backed services
 
 ```console
-git clone https://github.com/your-name/vanityctl.git
+git clone https://github.com/ThatXliner/vanityctl.git
 cd vanityctl
-cargo install --path .
+cargo install --locked --path .
+export PATH="$HOME/.cargo/bin:$PATH"
+vanityctl install --start --codex-skill
 ```
 
-This installs `hostd` and `vanityctl`. Start `hostd` in a terminal while evaluating
-V0:
+Cargo installs both `hostd` and `vanityctl`. The install command creates a private
+loopback API configuration/token, the user `hostd` launch agent, and an optional
+Codex operations skill. It starts hostd, preserves existing configuration and a
+compatible existing agent, and does not apply or restart managed workloads.
+`CODEX_HOME` selects the Codex skill destination when set. A conflicting
+user-written skill or agent is preserved with an actionable error.
+
+For evaluation without launchd, omit the install command and run hostd manually
+after configuring the registry:
 
 ```console
 RUST_LOG=hostd=info hostd
 ```
 
-For persistent use, create one small launchd agent for `hostd` itself. A packaged
-self-installer is planned; vanityctl-generated workload plists do not require users
-to author one plist per workload.
+When upgrading, install both binaries into the same directory already on your
+PATH. `vanityctl install` preserves an already-loaded daemon; reload only hostd
+to use the new binary (`launchctl kickstart -k gui/$(id -u)/dev.vanityctl.hostd`).
+This does not restart its managed workloads. Do not replace a custom agent that
+uses a different executable or configuration without reviewing it.
 
 ## Quick start
 
-Create the machine registry:
+After installation, add your service fragments to the machine registry. On a
+fresh host you can start from the examples (preserve the generated API block):
 
 ```console
 mkdir -p ~/.vanityctl/services
-cp examples/machine/config.yaml ~/.vanityctl/config.yaml
 cp examples/machine/services/*.yaml ~/.vanityctl/services/
 vanityctl config validate
-hostd
 ```
 
 In another terminal:
 
 ```console
 vanityctl doctor
-vanityctl apply
+vanityctl agent-context SERVICE --json
+vanityctl up SERVICE
 vanityctl status
 vanityctl dashboard
 ```
@@ -119,6 +130,9 @@ vanityctl dashboard
 <http://127.0.0.1:7788>). `apply` is idempotent: unchanged launchd definitions and
 matching managed Docker container configuration are left alone. Compose `up -d` is
 delegated to Compose, which performs its own reconciliation.
+`vanityctl up NAME` reconciles only that service and always lets Compose re-read
+its environment files. `start NAME` resumes existing resources; it does not create
+missing Compose containers. Global `apply` still reconciles the entire registry.
 
 ## Configuration
 
@@ -208,6 +222,9 @@ if any file is missing or unreadable.
 operations. A Git deployment pulls and builds before replacing the running stack.
 Repeated `apply` calls skip unchanged Compose projects; changes to any configured
 Compose file invalidate the reconciliation fingerprint.
+For changes to `.env` or referenced environment files, use `vanityctl up NAME`.
+It delegates the fully resolved comparison to Compose rather than skipping on
+the Compose YAML fingerprint alone, and preserves every configured overlay.
 
 ### Native processes
 
@@ -417,6 +434,8 @@ instructions or exposing secrets:
 vanityctl list --json
 vanityctl status --json
 vanityctl describe billion --json
+vanityctl agent-context billion --json
+vanityctl discover billion --json
 vanityctl agent-context > /tmp/vanityctl-context.md
 ```
 
@@ -428,6 +447,21 @@ Do not manually start, kill, or replace managed workloads.
 Before changing deployment behavior, run `vanityctl describe <service> --json`.
 Use `vanityctl status`, `logs`, `restart`, and `deploy` for operations.
 ```
+
+`vanityctl install --codex-skill` installs the canonical
+[operations skill](skills/vanityctl/SKILL.md). On a separate coding-agent client,
+copy that skill into the client's Codex skills directory too; run the commands
+over the target host's existing SSH alias. The skill is discoverable in subsequent
+sessions. [Agent workflows](docs/agent-workflows.md) explains the short command
+sequence for discovery, configuration changes, deployment and verification.
+
+`agent-context NAME --json` emits focused, versioned metadata and command arrays
+without probing every backend or exposing environment values, source URLs or
+command arguments. `discover [QUERY]` inventories Docker/Compose metadata and
+installed launchd labels, showing registered names where known. It never imports,
+starts or rewrites resources. Discovery and agent context remain token-protected
+even when the dashboard's public read-only mode is enabled. Installed plists may
+be legacy/stopped definitions; verify ownership and status before adoption.
 
 ## Troubleshooting
 
@@ -451,12 +485,12 @@ implemented. Current limitations include: a deliberately small launchd cron subs
 no health-check schema or readiness gate; no blue/green port switching; no webhook
 receiver; best-effort CPU/RAM metrics for Docker and
 native PIDs; polling-based rather than push-based live logs; a read-only config UI;
-and no packaged `hostd` installer. Compose reconciliation inherits Compose's own
+and launchd-only daemon installation. Compose reconciliation inherits Compose's own
 idempotence. State uses a bounded atomic JSON file, which is appropriate for one
 host but may move to SQLite as history/query volume grows.
 
 The next reliability milestones are systemd, readiness checks, webhook signature
-verification, a daemon self-installer, richer job next-run
+verification, richer job next-run
 calculation, and end-to-end macOS integration fixtures.
 
 ## Development

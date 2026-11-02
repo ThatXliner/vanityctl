@@ -19,6 +19,10 @@ use crate::{
 pub trait Backend: Send + Sync {
     async fn status(&self, name: &str, service: &Service) -> Result<ServiceStatus>;
     async fn apply(&self, name: &str, service: &Service) -> Result<bool>;
+    async fn up(&self, name: &str, service: &Service) -> Result<()> {
+        self.apply(name, service).await?;
+        Ok(())
+    }
     async fn start(&self, name: &str, service: &Service) -> Result<()>;
     async fn stop(&self, name: &str, service: &Service) -> Result<()>;
     async fn restart(&self, name: &str, service: &Service) -> Result<()>;
@@ -443,6 +447,11 @@ impl ComposeBackend {
 
 #[async_trait]
 impl Backend for ComposeBackend {
+    async fn up(&self, name: &str, service: &Service) -> Result<()> {
+        // Let Compose compare its fully resolved config, including external env files.
+        self.reconcile(name, service, true)?;
+        Ok(())
+    }
     async fn status(&self, name: &str, service: &Service) -> Result<ServiceStatus> {
         let (mut args, cwd) = Self::base(service)?;
         args.extend([
