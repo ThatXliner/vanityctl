@@ -32,7 +32,7 @@ operator has reviewed its intended state.
 
 ## Installation is a step the agent can execute
 
-The [manual installation instructions](../README.md#manual-installation) remain
+The [manual installation instructions](guide.md#manual-installation) remain
 available for operators and automation. On a new supported Mac, the agent can
 build the CLI/daemon and use:
 

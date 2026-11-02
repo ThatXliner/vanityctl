@@ -2,21 +2,16 @@
 
 **Agent-managed self-hosted hardware.**
 
-[Website](https://bryanhu.com/vanityctl/) · [Ask your agent to set it up](#installation) · [Onboarding guide](docs/onboarding.md) · [Manual installation](#manual-installation)
+One registry and CLI for the services running on your machine. Bring Codex,
+Claude Code, or your preferred coding agent to set it up and maintain it—without
+rediscovering Docker commands, startup scripts and deployment instructions each
+session.
 
-Give Codex, Claude Code, or your preferred coding agent a durable understanding
-of your self-hosted machine. vanityctl keeps services, startup behavior, deployment
-inputs and operational commands in one declarative registry, with a focused CLI
-and structured JSON that an agent can use directly.
-
-Your agent helps inventory the hardware, bring existing services under management,
-and maintain it across sessions. `hostd` executes the registered operations through
-Docker, Compose, launchd, Git and DNS adapters. The same commands work for a human
-operator. macOS is the native-service target today.
+[Website](https://bryanhu.com/vanityctl/) · [Documentation](docs/README.md) · [How it compares](docs/comparison.md)
 
 ## Installation
 
-**Send this prompt to your coding agent:**
+Send this to your coding agent:
 
 ```text
 Help me set up vanityctl on my self-hosted machine and bring my existing
@@ -26,531 +21,42 @@ Use the machine or SSH host I have authorized. Begin with a read-only
 inventory and a concrete migration plan for the services already running.
 ```
 
-The [full setup prompt](prompts/install.md) is the canonical onboarding workflow.
-It asks your agent to install the supported tooling, preserve existing services
-and private configuration, migrate gradually, verify application behavior, and
-leave a maintained infrastructure repo for future sessions. It works with an
-existing machine as well as a fresh one; it does not assume a blank server.
+Your agent inventories the host, installs the tooling, and helps migrate existing
+services gradually. It preserves private configuration, checks application health,
+and leaves operational knowledge for the next session.
 
-Already have the CLI? Print that same prompt without changing the machine:
+Prefer to do it yourself? Follow the [manual installation guide](docs/guide.md#manual-installation).
+Already have the CLI? `vanityctl install --prompt` prints the full setup prompt.
 
-```console
-vanityctl install --prompt
-```
-
-Your agent uses the [manual installer](#manual-installation) underneath. Installation
-and migration remain inspectable steps, with existing deployment ownership,
-service-specific rollback and the operator's authorization preserved. Read the
-[onboarding guide](docs/onboarding.md) for supported migration paths and limits.
-
-## The machine knowledge your agent needs
-
-An agent should be able to find a workload, understand its operation, inspect it,
-and apply an intended change:
+## Everyday commands
 
 ```console
-vanityctl discover app --json
-vanityctl agent-context app --json
-vanityctl status app --json
-vanityctl up app --json
-```
-
-- **Durable operational knowledge:** service definitions, Compose input order,
-  environment-file references, schedules and deployment configuration persist
-  across agent sessions.
-- **Focused context:** compact service metadata and exact next-command arrays
-  reduce repeated host searches and deployment-file reading.
-- **Incremental onboarding:** read-only discovery identifies existing workloads;
-  registration and supported adoption are separate, deliberate migration steps.
-- **One operational vocabulary:** Docker containers, Compose stacks, native
-  processes and scheduled jobs share status, logs and lifecycle commands.
-- **A reusable agent skill:** Codex can discover the workflow before reconstructing
-  host-specific scripts. Other coding agents can read the same instructions.
-
-Bring your own agent. vanityctl is a local Rust CLI and execution daemon, with an
-embedded dashboard; it does not require a hosted agent service or an LLM inside
-hostd. See [agent workflows](docs/agent-workflows.md) and
-[AI-agent integration](#ai-agent-integration) for the recurring maintenance loop.
-
-## Why Rust
-
-Rust provides a small, low-overhead single binary; reliable typed configuration;
-strong process and concurrency primitives; and mature CLI, YAML, and HTTP libraries.
-It also makes it practical for `hostd`, the CLI, and the embedded UI to share one
-model without requiring a runtime such as Node.js on the managed machine.
-
-## Not Kubernetes
-
-vanityctl assumes one machine. It has no nodes, pods, replica sets, cluster network,
-distributed scheduler, or consensus layer. Docker still runs containers, Compose
-still describes multi-container applications, and launchd still supervises native
-processes. vanityctl is the boring layer above them that owns machine-level intent.
-
-Use Coolify for a self-hosted app PaaS, Portainer for container administration, PM2
-for application processes, or Kubernetes for distributed orchestration. vanityctl's
-niche is a version-controlled whole-machine registry spanning all those workload
-shapes without turning everything into a container.
-
-For a detailed feature comparison and discussion of Coolify, Portainer, PM2,
-Docker Compose, launchd/systemd, CasaOS, Umbrel, Kubernetes, and shell scripts, see
-[How vanityctl differs from existing tools](docs/comparison.md).
-
-## Current architecture
-
-```text
-~/.vanityctl/config.yaml + services/*.yaml
-                    |
-                  hostd
-       +-------------+------------+------------+
-       |             |            |            |
- Docker/Compose   launchd      Git deploys   Cloudflare DNS
-       |             |            |            |
-       +-------------+------------+------------+
-                    |
-        localhost HTTP/JSON + SSE
-             +-------------+
-             |             |
-         vanityctl      dashboard
-```
-
-`hostd` alone performs orchestration. The CLI and dashboard consume its API. See
-[the V0 architecture](docs/architecture.md) for ownership and safety boundaries.
-
-## Manual installation
-
-Requirements:
-
-- macOS (native processes/jobs use launchd)
-- Rust 1.88 or newer to build from source
-- Docker Desktop or another compatible Docker engine for Docker workloads
-- Git for source-backed services
-
-```console
-git clone https://github.com/ThatXliner/vanityctl.git
-cd vanityctl
-cargo install --locked --path .
-export PATH="$HOME/.cargo/bin:$PATH"
-vanityctl install --start --codex-skill
-```
-
-Cargo installs both `hostd` and `vanityctl`. The install command creates a private
-loopback API configuration/token, the user `hostd` launch agent, and an optional
-Codex operations skill. It starts hostd, preserves existing configuration and a
-compatible existing agent, and does not apply or restart managed workloads.
-`CODEX_HOME` selects the Codex skill destination when set. A conflicting
-user-written skill or agent is preserved with an actionable error.
-
-For evaluation without launchd, omit the install command and run hostd manually
-after configuring the registry:
-
-```console
-RUST_LOG=hostd=info hostd
-```
-
-When upgrading, install both binaries into the same directory already on your
-PATH. `vanityctl install` preserves an already-loaded daemon; reload only hostd
-to use the new binary (`launchctl kickstart -k gui/$(id -u)/dev.vanityctl.hostd`).
-This does not restart its managed workloads. Do not replace a custom agent that
-uses a different executable or configuration without reviewing it.
-
-## Quick start
-
-After installation, add your service fragments to the machine registry. On a
-fresh host you can start from the examples (preserve the generated API block):
-
-```console
-mkdir -p ~/.vanityctl/services
-cp examples/machine/services/*.yaml ~/.vanityctl/services/
-vanityctl config validate
-```
-
-In another terminal:
-
-```console
-vanityctl doctor
-vanityctl agent-context SERVICE --json
-vanityctl up SERVICE
 vanityctl status
-vanityctl dashboard
+vanityctl logs my-app --lines 50
+vanityctl up my-app
+vanityctl restart my-app
 ```
 
-`vanityctl dashboard` prints the local dashboard URL (by default
-<http://127.0.0.1:7788>). `apply` is idempotent: unchanged launchd definitions and
-matching managed Docker container configuration are left alone. Compose `up -d` is
-delegated to Compose, which performs its own reconciliation.
-`vanityctl up NAME` reconciles only that service and always lets Compose re-read
-its environment files. `start NAME` resumes existing resources; it does not create
-missing Compose containers. Global `apply` still reconciles the entire registry.
+For agents, `discover QUERY --json` finds existing workloads and
+`agent-context NAME --json` supplies focused metadata and next commands.
 
-## Configuration
+## What it manages
 
-The default root is `~/.vanityctl`:
+- Docker containers and existing Compose stacks.
+- Native processes and scheduled jobs through macOS launchd.
+- Optional Git deployments and Cloudflare DNS reconciliation.
 
-```text
-~/.vanityctl/
-├── config.yaml             # main desired state; safe to version-control
-├── services/               # optional service fragments; safe to version-control
-├── plugins/cache/          # pinned third-party plugin checkouts; do not edit
-├── generated/              # owned launchd artifacts
-├── logs/                   # service, job, and deployment logs
-└── state/state.json        # observations and bounded history
-```
+A local daemon handles execution. Humans and agents use the same CLI and API;
+vanityctl does not require a hosted agent service or an LLM inside the daemon.
 
-Set `VANITYCTL_CONFIG=/path/to/infra/config.yaml` to use a checked-out infrastructure
-repository elsewhere. Add `state/`, `logs/`, `generated/`, and `plugins/cache/` to that repository's
-`.gitignore`. The main file and every fragment use strict parsing: misspelled or
-unknown fields fail validation instead of being ignored.
+## Go deeper
 
-A complete single-file registry is available at
-[examples/full-config.yaml](examples/full-config.yaml). A minimal container is:
+- [Documentation](docs/README.md): installation, configuration, operations and troubleshooting.
+- [Onboarding existing services](docs/onboarding.md): inventory, ownership, migration and rollback.
+- [Agent workflows](docs/agent-workflows.md): recurring maintenance with less rediscovery.
+- [Operator guide](docs/guide.md): the complete technical reference.
 
-```yaml
-version: 1
-services:
-  minecraft:
-    type: docker
-    image: itzg/minecraft-server
-    ports: ["25565:25565"]
-    volumes: ["~/data/minecraft:/data"]
-    environment:
-      EULA: "TRUE"
-    restart: always
-```
+macOS-first and early-stage. Linux native-service management and systemd are
+not implemented yet. See [current limitations](docs/guide.md#project-status-and-limitations).
 
-Reusable integrations can be declared as version-pinned, data-only plugins. The
-built-in standard library starts with `supabase-selfhost`; local directories and
-immutable Git commit sources are also supported. Plugins resolve to ordinary
-services without install-time extension code. A plugin may also materialize one
-commit-pinned upstream application repository into a missing or empty directory. See
-[Declarative plugins](docs/plugins.md).
-
-### Docker
-
-`type: docker` supports an existing `image` or a `build` block, ports, bind/named
-volumes, environment variables, `env_file`, command/arguments, and Docker restart
-policies. Managed containers are named `vanityctl-<service>` and labeled with an
-ownership marker and configuration hash. A changed Dockerfile workload builds the
-new image before the old managed container is replaced. Persistent volumes are never
-deleted by `apply`.
-
-```yaml
-billion:
-  type: docker
-  directory: ~/services/billion
-  build:
-    dockerfile: Dockerfile
-    context: .
-    args:
-      APP_ENV: production
-  ports: ["3000:3000"]
-  env_file: ~/secrets/billion.env
-  restart: unless-stopped
-```
-
-### Compose
-
-Compose remains responsible for its application's internal topology:
-
-```yaml
-immich:
-  type: compose
-  directory: ~/services/immich
-  files:
-    - compose.yaml
-    - compose.production.yaml
-```
-
-vanityctl runs the matching `docker compose` lifecycle and log commands from that
-directory. File order is preserved for every command. The singular `file:` key is
-still accepted for existing configurations, but new configurations should use
-`files:`. Relative paths resolve from `directory`; validation fails before mutation
-if any file is missing or unreadable.
-
-`vanityctl pull immich` and `vanityctl build immich` expose Compose's corresponding
-operations. A Git deployment pulls and builds before replacing the running stack.
-Repeated `apply` calls skip unchanged Compose projects; changes to any configured
-Compose file invalidate the reconciliation fingerprint.
-For changes to `.env` or referenced environment files, use `vanityctl up NAME`.
-It delegates the fully resolved comparison to Compose rather than skipping on
-the Compose YAML fingerprint alone, and preserves every configured overlay.
-
-### Native processes
-
-```yaml
-local-llm:
-  type: process
-  directory: ~/services/llm
-  command: ./serve.sh
-  args: ["--port", "11434"]
-  restart: always
-  throttle_interval: 30
-  process_type: background
-  env_file: ~/.config/vanityctl/secrets/local-llm.env
-```
-
-On macOS, `apply` generates an owned `dev.vanityctl.<name>` plist beneath
-`~/.vanityctl/generated/launchd` and bootstraps it into the current user's launchd
-GUI domain. stdout and stderr go to `~/.vanityctl/logs/<name>.log`. vanityctl refuses
-to overwrite a generated-path file that lacks its ownership marker.
-
-`command` is executed directly, not via an implicit shell. Use an explicit script
-or `/bin/sh` plus arguments if shell behavior is actually needed.
-Native `env_file` inputs must be private (`chmod 600`). Optional launchd tuning also
-includes `run_at_load`, `restart: on-failure`, `low_priority_io`, and
-`resource_limits.open_files`.
-
-Existing user LaunchAgents require an explicit, dry-run-first ownership handoff:
-
-```console
-vanityctl adopt launchd com.example.worker --as worker
-vanityctl adopt launchd com.example.worker --as worker --execute
-```
-
-See [Adopting an existing launchd service](docs/launchd-adoption.md) for the
-supported plist shape, duplicate-process protection, rollback, and limitations.
-
-### Scheduled jobs
-
-```yaml
-scraper:
-  type: job
-  directory: ~/services/scraper
-  command: ./scrape.sh
-  schedule: "0 4 * * *"
-  run_at_load: true # run at login, then follow the schedule
-```
-
-V0 compiles exact daily times (`0 4 * * *`) and minute intervals
-(`*/30 * * * *`) to launchd. Other cron shapes fail with a clear validation/apply
-error rather than silently changing semantics. Manual runs record start time,
-duration, exit code, and a log file:
-
-```console
-vanityctl jobs
-vanityctl run scraper
-vanityctl history scraper --json
-vanityctl disable scraper
-vanityctl enable scraper
-```
-
-Enable/disable is a runtime override. `vanityctl apply` restores the declarative
-`enabled` value from YAML.
-
-## Git deployment and automatic deploys
-
-```yaml
-billion:
-  type: docker
-  directory: ~/services/billion
-  build: { dockerfile: Dockerfile }
-  source:
-    type: git
-    repo: git@github.com:ThatXliner/billion.git
-    branch: main
-  deploy:
-    auto: true
-    strategy: pull
-    trigger:
-      type: poll
-      interval: 60s
-    before:
-      - pnpm install --frozen-lockfile
-    build:
-      - pnpm build
-    after:
-      - echo deployed
-```
-
-Manual deployment fetches the configured branch, checks out its exact remote commit,
-runs hooks, reconciles the workload, and records an immutable deployment entry and
-log. Hooks are the explicit shell escape hatch and run with `/bin/sh -lc` in the
-service directory.
-
-```console
-vanityctl deploy billion
-vanityctl deploy billion --retry
-vanityctl deploy history billion --json
-vanityctl deploy logs billion
-vanityctl deploy auto-disable billion
-```
-
-Polling uses `git ls-remote` and deploys only a new commit. Each service has a deploy
-mutex, so deploys cannot overlap. One poll worker per Git service means rapid commits
-coalesce to the latest observed commit. A failed commit is recorded and not retried
-forever; use `--retry` or push a newer commit. The working service is not stopped
-before hooks and Docker builds succeed.
-
-Auto-enable/disable is also a runtime override. `apply` restores `deploy.auto` from
-YAML. Webhook/GitHub trigger variants are reserved in the model but intentionally
-rejected by V0 until signature verification and repository/branch checks are fully
-implemented.
-
-## DNS integration
-
-Cloudflare credentials are referenced by a private file (recommended for `hostd`)
-or an environment variable and never returned by `describe`, JSON status, or the
-dashboard:
-
-```yaml
-dns:
-  provider: cloudflare
-  credentials: ~/.config/vanityctl/cloudflare-token
-  dynamic:
-    - billion.example.com
-    - mc.example.com
-```
-
-```console
-vanityctl dns status
-vanityctl dns records --json
-vanityctl dns reconcile
-```
-
-Each `dynamic` hostname means an unproxied `A` record following this machine's
-public IPv4 address. vanityctl discovers the matching Cloudflare zone and uses a
-five-minute interval by default. The expanded `zone_id`, `token_file`/`token_env`,
-`interval`, and `records` form remains available for uncommon record types and
-provider settings.
-
-The reconciler resolves the public IP only when checking, compares desired records
-with provider state, and writes only drifted records. Registrar operations, email
-DNS, DNSSEC, nameserver migration, and general Cloudflare administration are out of
-scope.
-
-DNS desired state and reconciliation remain part of the control plane. Providers
-are adapters, so another provider can be added without turning dynamic DNS into a
-generated shell job.
-
-## CLI and API
-
-```text
-vanityctl list [--json]
-vanityctl status [SERVICE] [--json]       (alias: ps)
-vanityctl describe SERVICE [--json]
-vanityctl start|stop|restart SERVICE
-vanityctl pull|build SERVICE              (Compose services)
-vanityctl logs SERVICE [-f] [--lines N]
-vanityctl apply
-vanityctl apply --dry-run
-vanityctl plugin [list|library]
-vanityctl plugin describe INSTANCE
-vanityctl deploy SERVICE [--retry]
-vanityctl deploy history|logs SERVICE
-vanityctl deploy auto-enable|auto-disable SERVICE
-vanityctl jobs
-vanityctl run SERVICE
-vanityctl history SERVICE [--json]
-vanityctl enable|disable SERVICE
-vanityctl doctor [--json]
-vanityctl config validate
-vanityctl dns [status|records|reconcile]
-vanityctl agent-context
-vanityctl dashboard
-```
-
-The daemon API includes `/api/services`, per-service lifecycle/log/deployment routes,
-`/api/jobs`, `/api/system`, `/api/events`, `/api/events/stream`, `/api/dns`, and
-`/api/agent-context`. API errors are JSON. The browser dashboard is embedded in
-`hostd`, refreshes machine state, offers workload-appropriate restart/run actions,
-and shows redacted configuration and recent logs.
-
-The API binds to `127.0.0.1:7788` by default. Configure `api.token_env` or
-`api.token_file` to require a bearer token. For a public status dashboard while
-keeping machine controls private, enable the explicit read-only allowlist:
-
-```yaml
-api:
-  token_file: ~/.vanityctl/api-token
-  public_read_only: true
-```
-
-This exposes status, host resource usage, jobs, activity, and DNS status. Logs,
-configuration, agent context, and every mutating route remain authenticated. A
-non-loopback listener still requires a token source. Do not assume a LAN is trusted.
-
-The dashboard reports host CPU and RAM usage and, on Apple Silicon Macs, GPU
-utilization and GPU-associated system memory when the graphics driver publishes
-those counters. Docker and Compose rows report CPU and RAM; Compose values are
-aggregated across the project's running containers.
-
-## AI-agent integration
-
-Stable JSON output and a redacted description keep agents from rediscovering deploy
-instructions or exposing secrets:
-
-```console
-vanityctl list --json
-vanityctl status --json
-vanityctl describe billion --json
-vanityctl agent-context billion --json
-vanityctl discover billion --json
-vanityctl agent-context > /tmp/vanityctl-context.md
-```
-
-A useful machine-level `AGENTS.md` is:
-
-```markdown
-All services on this machine are managed through vanityctl.
-Do not manually start, kill, or replace managed workloads.
-Before changing deployment behavior, run `vanityctl describe <service> --json`.
-Use `vanityctl status`, `logs`, `restart`, and `deploy` for operations.
-```
-
-`vanityctl install --codex-skill` installs the canonical
-[operations skill](skills/vanityctl/SKILL.md). On a separate coding-agent client,
-copy that skill into the client's Codex skills directory too; run the commands
-over the target host's existing SSH alias. The skill is discoverable in subsequent
-sessions. [Agent workflows](docs/agent-workflows.md) explains the short command
-sequence for discovery, configuration changes, deployment and verification.
-
-`agent-context NAME --json` emits focused, versioned metadata and command arrays
-without probing every backend or exposing environment values, source URLs or
-command arguments. `discover [QUERY]` inventories Docker/Compose metadata and
-installed launchd labels, showing registered names where known. It never imports,
-starts or rewrites resources. Discovery and agent context remain token-protected
-even when the dashboard's public read-only mode is enabled. Installed plists may
-be legacy/stopped definitions; verify ownership and status before adoption.
-
-## Troubleshooting
-
-- **Cannot reach hostd:** start `hostd`; confirm its logged listen address and that
-  `VANITYCTL_CONFIG` is the same in both shells.
-- **Docker check fails:** start Docker Desktop and run `vanityctl doctor` again.
-- **launchd service is stopped:** inspect `vanityctl logs <name>` and
-  `vanityctl status <name> --json`, then rerun `apply` after fixing configuration.
-- **Deploy will not retry a commit:** inspect `vanityctl deploy logs <name>`, fix the
-  cause, and explicitly run `vanityctl deploy <name> --retry`.
-- **Config reports an unknown field:** correct the spelling. Strict schema errors are
-  intentional.
-- **DNS credential missing:** use a mode-`600` `dns.token_file`, or export the
-  variable named by `dns.token_env` in the `hostd` environment. The value belongs
-  outside version control.
-
-## Project status and limitations
-
-V0 is macOS-first. Linux/systemd is an architectural extension point but is not yet
-implemented. Current limitations include: a deliberately small launchd cron subset;
-no health-check schema or readiness gate; no blue/green port switching; no webhook
-receiver; best-effort CPU/RAM metrics for Docker and
-native PIDs; polling-based rather than push-based live logs; a read-only config UI;
-and launchd-only daemon installation. Compose reconciliation inherits Compose's own
-idempotence. State uses a bounded atomic JSON file, which is appropriate for one
-host but may move to SQLite as history/query volume grows.
-
-The next reliability milestones are systemd, readiness checks, webhook signature
-verification, richer job next-run
-calculation, and end-to-end macOS integration fixtures.
-
-## Development
-
-```console
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets
-cargo build --release
-```
-
-Tests use injected command runners and temporary roots, so they do not modify real
-launchd jobs, containers, source directories, or DNS records.
-
-Licensed under the MIT License.
+[MIT license](LICENSE)
