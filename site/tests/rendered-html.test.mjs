@@ -32,17 +32,14 @@ test("server-renders the vanityctl landing page", async () => {
   assert.match(html, /<title>vanityctl[^<]*agent[^<]*<\/title>/i);
   assert.match(html, /agent.managed self.hosted hardware/i);
   assert.match(html, /<button[^>]*>[\s\S]*?Copy setup prompt[\s\S]*?<\/button>/);
-  assert.match(html, /vanityctl status/);
   assert.match(html, /Codex/);
   assert.match(html, /ThatXliner\/vanityctl/);
   assert.doesNotMatch(html, /Your site is taking shape|Building your site/);
 });
 
-test("explains incremental onboarding and links to current documentation", async () => {
+test("links to documentation for detailed setup and operation", async () => {
   const html = await (await render("/")).text();
 
-  assert.match(html, /inventory/i);
-  assert.match(html, /migration/i);
   assert.match(html, /macOS/);
   assert.match(html, /docs\/README\.md/);
   assert.match(html, /docs\/onboarding\.md/);

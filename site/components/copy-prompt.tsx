@@ -6,10 +6,10 @@ import { setupPrompt } from "../lib/setup-prompt";
 const promptSource = "https://github.com/ThatXliner/vanityctl/blob/main/prompts/install.md";
 
 const statusMessages = {
-  idle: "Copy it, then paste it into Codex, Claude Code or another coding agent.",
-  copied: "Copied. Paste it into your coding agent.",
+  idle: "paste it into your coding agent",
+  copied: "copied. Paste it into your coding agent.",
   manual:
-    "Your browser did not allow copying, so nothing was copied. The full prompt is selected below: press ⌘C or Ctrl+C, or use your device's Copy option.",
+    "clipboard blocked, so nothing was copied. The full prompt is selected below: press ⌘C or Ctrl+C, or use your device's Copy option.",
 };
 
 export function CopyPrompt() {
@@ -58,7 +58,6 @@ export function CopyPrompt() {
       className="prompt-panel"
       aria-labelledby="setup-prompt-label"
       data-expanded={expanded}
-      data-ui
     >
       <div className="prompt-head">
         <button type="button" className="button" onClick={copy}>
@@ -81,7 +80,7 @@ export function CopyPrompt() {
         id="setup-prompt-text"
         className="prompt-text"
         value={setupPrompt}
-        rows={12}
+        rows={5}
         readOnly
         spellCheck={false}
         aria-describedby="setup-prompt-status"
@@ -89,15 +88,15 @@ export function CopyPrompt() {
       <div className="prompt-foot">
         <button
           type="button"
-          className="text-button"
+          className="text-button bracketed"
           aria-expanded={expanded}
           aria-controls="setup-prompt-text"
           onClick={() => setExpanded(!expanded)}
         >
-          {expanded ? "Collapse prompt" : "Show full prompt"}
+          {expanded ? "collapse prompt" : "show full prompt"}
         </button>
         <a className="text-link" href={promptSource}>
-          prompts/install.md
+          prompts/install.md ↗
         </a>
       </div>
     </section>
