@@ -3,7 +3,7 @@
 :root { --bg:#080b0a; --panel:#111613; --text:#dce7dc; --bright:#f4f8f4; --muted:#9aa69e; --green:#b9ef63; --green-hover:#cdf585; --orange:#ff8a5c; }
 html { background:var(--bg); }
 /* next/font sets its variables on body, so the aliases must live here too. */
-body { --mono:var(--font-geist-mono),ui-monospace,monospace; --sans:var(--font-geist-sans),sans-serif; margin:0; color:var(--text); background:var(--bg); font:18px/1.6 var(--sans); }
+body { --mono:var(--font-geist-mono),ui-monospace,monospace; margin:0; color:var(--text); background:var(--bg); font:18px/1.6 var(--mono); }
 a { color:inherit; }
 code,textarea { font-family:var(--mono); }
 ::selection { background:var(--green); color:var(--bg); }
@@ -17,14 +17,14 @@ code,textarea { font-family:var(--mono); }
 .site-header a:hover { color:var(--bright); }
 
 .hero { padding-top:clamp(16px,7vh,120px); }
-h1 { margin-left:-.05em; color:var(--bright); font:600 min(22vw,216px)/.86 var(--sans); letter-spacing:-.065em; }
-.tagline { margin-top:clamp(16px,2.5vw,28px); color:var(--bright); font-size:clamp(23px,3.2vw,38px); font-weight:500; line-height:1.2; letter-spacing:-.025em; }
+h1 { margin-left:-.05em; color:var(--bright); font:600 min(17vw,180px)/.86 var(--mono); letter-spacing:-.065em; }
+.tagline { margin-top:clamp(16px,2.5vw,28px); color:var(--bright); font-size:clamp(21px,3.2vw,38px); font-weight:500; line-height:1.2; letter-spacing:-.025em; }
 .intro { max-width:34em; margin-top:16px; }
 
 /* Copy action, status and the disclosable prompt */
 .prompt-panel { margin-top:32px; scroll-margin-top:16px; }
 .prompt-head { display:flex; flex-wrap:wrap; align-items:flex-start; gap:8px 24px; }
-.button { order:1; display:inline-flex; align-items:center; justify-content:center; flex:1 1 100%; min-height:52px; padding:0 24px; border:0; background:var(--green); color:var(--bg); font:600 17px var(--sans); cursor:pointer; transition:background-color .15s,transform .15s; }
+.button { order:1; display:inline-flex; align-items:center; justify-content:center; flex:1 1 100%; min-height:52px; padding:0 24px; border:0; background:var(--green); color:var(--bg); font:600 17px var(--mono); cursor:pointer; transition:background-color .15s,transform .15s; }
 .button:hover { background:var(--green-hover); }
 .button:active { transform:translateY(1px); }
 .button:focus-visible { outline-color:var(--bright); }

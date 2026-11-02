@@ -18,7 +18,7 @@ export default function Home() {
         <section className="hero">
           <h1>vanityctl</h1>
           <p className="tagline">Agent-managed self-hosted hardware.</p>
-          <p className="intro">Hand Codex, Claude Code or any coding agent one prompt. It sets up vanityctl and brings the services already on your Mac into one registry and CLI.</p>
+          <p className="intro">Give Codex, Claude Code or your agent one prompt to bring existing services into one registry and CLI.</p>
           <CopyPrompt />
         </section>
 
