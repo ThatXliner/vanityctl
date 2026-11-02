@@ -2,8 +2,12 @@
 
 [Website](https://bryanhu.com/vanityctl/) · [Documentation](#quick-start)
 
-`vanityctl` is a single-node declarative control plane for self-hosters and
-developers. It answers one question:
+`vanityctl` is a single-node declarative control plane for self-hosters,
+developers, and coding agents such as **Codex**. It is optimized for agents to
+discover and operate services through a small, predictable CLI, with focused
+context and structured JSON output.
+
+It answers one question:
 
 > What should be running on this machine?
 
@@ -23,6 +27,40 @@ This repository is a runnable V0, not a mockup. It includes the `hostd` daemon, 
 `vanityctl` API client, an embedded local dashboard, macOS launchd integration,
 Docker and Compose backends, Git deployment/polling, job history, JSON output, and
 optional Cloudflare DNS reconciliation.
+
+## Built for Codex and other coding agents
+
+Give your agent the machine's operational knowledge in a form it can use directly.
+One registry records how services run, where their configuration lives, and which
+backend handles each operation. That knowledge persists across coding sessions,
+reducing repeated host searches, context spent reading deployment files, and
+one-off Docker or launchd scripts.
+
+An agent can find a workload, get just its context, inspect it, and apply a change:
+
+```console
+vanityctl discover app --json
+vanityctl agent-context app --json
+vanityctl status app --json
+vanityctl up app --json
+```
+
+- **Focused context:** service metadata and exact next-command arrays, including
+  Compose file order and whether Git deployment is configured.
+- **Read-only discovery:** existing Docker/Compose workloads and installed
+  launchd definitions, with their registered service names where known.
+- **Targeted operations:** inspect or reconcile one service, including Compose
+  environment-file changes, through the same CLI used by a human operator.
+- **Reusable Codex skill:** install the operational workflow so agents know to
+  use vanityctl before reconstructing host-specific commands.
+
+```console
+vanityctl install --start --codex-skill
+```
+
+See [agent workflows](docs/agent-workflows.md) for examples and
+[AI-agent integration](#ai-agent-integration) for skill setup on a separate coding
+machine and details of the metadata exposed to agents.
 
 ## Why Rust
 
