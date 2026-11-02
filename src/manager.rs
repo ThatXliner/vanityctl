@@ -827,7 +827,8 @@ impl Manager {
                 svc.description.unwrap_or_else(|| "no description".into())
             ));
         }
-        out.push_str("\nUseful commands: `vanityctl status --json`, `vanityctl describe <service> --json`, `vanityctl logs <service>`, `vanityctl restart <service>`, `vanityctl deploy <service>`.\n");
+        out.push_str("\nStart with `vanityctl agent-context <service> --json` for focused metadata and operation commands. Use `vanityctl discover <query> --json` for unregistered resources; discovery never adopts them. Use `vanityctl up <service>` for initial creation and configuration/environment changes. `start` only resumes existing resources; global `apply` reconciles every service.\n");
+        out.push_str("Useful commands: `vanityctl status <service> --json`, `vanityctl logs <service> --lines 50`, `vanityctl restart <service>`, and `vanityctl deploy <service>` for configured Git deployments.\n");
         Ok(out)
     }
 
@@ -949,6 +950,7 @@ fn hostname() -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_apple_gpu_metrics(output: &str) -> (Option<f64>, Option<u64>) {
     let value_after = |key: &str| {
         output.split(key).nth(1).and_then(|tail| {
