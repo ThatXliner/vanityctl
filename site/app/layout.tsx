@@ -5,17 +5,20 @@ import "./globals.css";
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
 
+const title = "vanityctl: agent-managed self-hosted hardware";
+const description =
+  "Give Codex, Claude Code or another coding agent one setup prompt. It inventories your host, plans the migration and operates services through a lasting registry and CLI.";
+
 export const metadata: Metadata = {
   metadataBase: new URL("https://bryanhu.com/vanityctl/"),
-  title: "vanityctl — one control plane for this computer",
-  description:
-    "A single-node declarative control plane for Docker, native processes, scheduled jobs, Git deployments, and DNS.",
+  title,
+  description,
   icons: {
     icon: "https://bryanhu.com/vanityctl/vanityctl-logo.png",
   },
   openGraph: {
-    title: "vanityctl — one control plane for this computer",
-    description: "Everything this machine is responsible for, in one declarative registry.",
+    title,
+    description,
     type: "website",
     url: "https://bryanhu.com/vanityctl/",
     images: [
@@ -23,12 +26,14 @@ export const metadata: Metadata = {
         url: "https://bryanhu.com/vanityctl/og.png",
         width: 1200,
         height: 630,
-        alt: "vanityctl — one control plane for this computer",
+        alt: "vanityctl: Agent-managed self-hosted hardware. Copy the setup prompt for your coding agent.",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
+    title,
+    description,
     images: ["https://bryanhu.com/vanityctl/og.png"],
   },
 };

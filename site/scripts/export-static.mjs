@@ -39,7 +39,7 @@ await writeFile(resolve(out, "index.html"), html);
 await writeFile(resolve(out, ".nojekyll"), "");
 
 const exported = await readFile(resolve(out, "index.html"), "utf8");
-if (!exported.includes("Everything this machine")) {
+if (!/agent.managed self.hosted hardware/i.test(exported) || !exported.includes("Copy setup prompt")) {
   throw new Error("Static export did not contain the vanityctl landing page");
 }
 

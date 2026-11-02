@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "site/**"
+      - "prompts/install.md"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -31,6 +32,8 @@ jobs:
       - run: npm ci
         working-directory: site
       - run: npm run build:pages
+        working-directory: site
+      - run: node --test tests/rendered-html.test.mjs
         working-directory: site
       - uses: actions/upload-pages-artifact@v3
         with:
