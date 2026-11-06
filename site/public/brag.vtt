@@ -1,0 +1,19 @@
+WEBVTT
+
+00:00.000 --> 00:04.000
+[Music] Every session, your agent starts from zero.
+
+00:04.000 --> 00:06.000
+vanityctl: agent-managed self-hosted hardware.
+
+00:06.000 --> 00:10.000
+One setup prompt. Copied. Paste it into your coding agent.
+
+00:10.000 --> 00:14.000
+What your agent sees: discover, register, agent-context.
+
+00:14.000 --> 00:18.000
+Same CLI for you and your agent. vanityctl status, vanityctl up.
+
+00:18.000 --> 00:22.000
+bryanhu.com/vanityctl. macOS first, MIT licensed.

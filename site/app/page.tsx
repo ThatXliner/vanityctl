@@ -23,6 +23,12 @@ export default function Home() {
           <CopyPrompt />
         </section>
 
+        <section className="film" aria-label="vanityctl in 22 seconds">
+          <video src="brag.mp4" poster="brag.jpg" controls playsInline preload="none">
+            <track kind="captions" src="brag.vtt" srcLang="en" label="English" />
+          </video>
+        </section>
+
         <section className="demo" aria-labelledby="demo-heading">
           <h2 id="demo-heading">What your agent sees</h2>
           <ServiceDemo />

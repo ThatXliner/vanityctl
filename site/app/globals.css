@@ -44,6 +44,10 @@ h1 { margin-left:-.05em; color:var(--bright); font:600 min(17vw,180px)/.86 var(-
 .prompt-text { display:block; width:100%; margin-top:8px; padding:20px; border:0; background:var(--panel); color:var(--text); font-size:14px; line-height:1.65; resize:vertical; field-sizing:content; scrollbar-color:#3a473f transparent; scroll-margin-block:16px; }
 .prompt-text:focus-visible { outline-offset:-2px; }
 
+/* Launch video */
+.film { margin-top:clamp(56px,8vw,96px); }
+.film video { display:block; width:100%; height:auto; aspect-ratio:16/9; border:1px solid #26302a; background:#0b0f0d; }
+
 /* Example session */
 .demo { margin-top:clamp(80px,11vw,144px); }
 .demo h2 { margin-bottom:20px; color:var(--bright); font-size:clamp(22px,2.2vw,28px); font-weight:600; line-height:1.2; letter-spacing:-.02em; }
