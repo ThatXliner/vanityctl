@@ -11,6 +11,11 @@
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-9aa69e?labelColor=111613"></a>
 </p>
 
+<p align="center">
+  <a href="brag-output/brag.mp4"><img src="brag-output/brag.jpg" alt="Watch the 22-second vanityctl video" width="720"></a>
+  <br><sub><a href="brag-output/brag.mp4">▶ Watch the 22-second video</a></sub>
+</p>
+
 One registry and CLI for the services running on your machine. Bring Codex,
 Claude Code, or your preferred coding agent to set it up and maintain it—without
 rediscovering Docker commands, startup scripts and deployment instructions each
