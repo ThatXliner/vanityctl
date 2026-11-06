@@ -1,6 +1,15 @@
-# vanityctl
+<p align="center"><img src="site/public/vanityctl-logo.png" alt="vanityctl logo" width="120"></p>
 
-**Agent-managed self-hosted hardware.**
+<h1 align="center">vanityctl</h1>
+
+<p align="center"><strong>Agent-managed self-hosted hardware.</strong></p>
+
+<p align="center">
+  <a href="https://bryanhu.com/vanityctl/"><img alt="Website" src="https://img.shields.io/badge/website-bryanhu.com%2Fvanityctl-b9ef63?labelColor=111613"></a>
+  <a href="https://github.com/ThatXliner/vanityctl/actions/workflows/rust.yml"><img alt="Rust CI" src="https://github.com/ThatXliner/vanityctl/actions/workflows/rust.yml/badge.svg"></a>
+  <img alt="macOS first" src="https://img.shields.io/badge/macOS-first-ff8a5c?labelColor=111613">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-9aa69e?labelColor=111613"></a>
+</p>
 
 One registry and CLI for the services running on your machine. Bring Codex,
 Claude Code, or your preferred coding agent to set it up and maintain it—without
