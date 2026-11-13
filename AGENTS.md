@@ -12,5 +12,5 @@ Verify Rust changes with `cargo fmt --check`, `cargo test --locked` and
 temporary configuration and RecordingRunner; live integration fixtures must own
 their resource names and clean up only those resources.
 
-When you say you'll implement something, actually do it.
+Finish the changes you describe. If you stop short, say what remains.
 When working on UI, ask Claude to design the interface.
