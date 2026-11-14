@@ -389,6 +389,17 @@ vanityctl agent-context
 vanityctl dashboard
 ```
 
+A registry entry can point at something that is missing on this machine, such
+as a deleted Compose directory, an unreadable Compose file, or an `env_file`
+that is missing or not private. vanityctl sets only that service aside as
+invalid. Every other service keeps working. `list` and `status` show the invalid
+service with its reason, commands on it fail with that reason, and `apply`
+reports it as an error. `config validate` and `doctor` report every such problem
+and fail until it is fixed. When the file or directory appears again, the service
+is valid on the next command. Errors in the configuration itself, such as bad
+YAML, duplicate service names, or an invalid schedule, still stop every command,
+because vanityctl cannot tell what was meant.
+
 The daemon API includes `/api/services`, per-service lifecycle/log/deployment routes,
 `/api/jobs`, `/api/system`, `/api/events`, `/api/events/stream`, `/api/dns`, and
 `/api/agent-context`. API errors are JSON. The browser dashboard is embedded in

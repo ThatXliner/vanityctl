@@ -143,7 +143,7 @@ impl LaunchdAdopter {
         }
         let mut parsed = ParsedAgent::read(&source, label)?;
         let config = HostConfig::load(&self.paths)?;
-        if config.services.contains_key(service_name) {
+        if config.contains_service(service_name) {
             bail!("service {service_name:?} already exists; refusing to overwrite it");
         }
         let service_file = self.paths.services.join(format!("{service_name}.yaml"));
@@ -182,12 +182,7 @@ impl LaunchdAdopter {
         }
 
         // Validate the imported definition and generated launchd representation before mutation.
-        let mut candidate_config = config;
-        candidate_config
-            .services
-            .insert(service_name.to_owned(), parsed.service.clone());
-        candidate_config
-            .validate()
+        crate::config::validate_service(service_name, &parsed.service)
             .context("candidate service is invalid")?;
         parsed.service.env_file = environment_file
             .as_ref()

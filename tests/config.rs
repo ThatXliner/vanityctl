@@ -124,7 +124,6 @@ fn rejects_ambiguous_empty_and_missing_compose_files() {
             "either legacy file or files",
         ),
         ("files: []", "must not be empty"),
-        ("files: [missing.yaml]", "is not readable"),
         (
             "files: [compose.yaml, compose.yaml]",
             "listed more than once",
@@ -146,6 +145,30 @@ fn rejects_ambiguous_empty_and_missing_compose_files() {
             "expected {expected:?} in {error:?}"
         );
     }
+}
+
+#[test]
+fn unreadable_compose_file_sets_only_that_service_aside() {
+    let dir = tempdir().unwrap();
+    let paths = ConfigPaths::from_root(dir.path().join("registry"));
+    fs::create_dir_all(&paths.root).unwrap();
+    let project = dir.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        &paths.config,
+        format!(
+            "version: 1\nservices:\n  app:\n    type: compose\n    directory: {}\n    files: [missing.yaml]\n",
+            project.display()
+        ),
+    )
+    .unwrap();
+    let config = HostConfig::load(&paths).unwrap();
+    assert!(config.services.is_empty());
+    assert!(
+        config.invalid_services["app"]
+            .reason
+            .contains("is not readable")
+    );
 }
 
 #[test]
@@ -186,11 +209,8 @@ fn dns_accepts_a_private_token_file() {
 
 #[cfg(unix)]
 #[test]
-fn dns_rejects_ambiguous_missing_and_public_token_files() {
+fn dns_rejects_missing_and_ambiguous_credential_sources() {
     let dir = tempdir().unwrap();
-    let public_token = dir.path().join("public-token");
-    fs::write(&public_token, "secret-token\n").unwrap();
-    fs::set_permissions(&public_token, fs::Permissions::from_mode(0o644)).unwrap();
 
     for (index, credentials, expected) in [
         (0, String::new(), "exactly one credential source"),
@@ -198,11 +218,6 @@ fn dns_rejects_ambiguous_missing_and_public_token_files() {
             1,
             "  token_env: CLOUDFLARE_API_TOKEN\n  token_file: /tmp/token\n".into(),
             "exactly one credential source",
-        ),
-        (
-            2,
-            format!("  token_file: {}\n", public_token.display()),
-            "must not be readable or writable by group/others",
         ),
     ] {
         let paths = ConfigPaths::from_root(dir.path().join(index.to_string()));
@@ -220,6 +235,28 @@ fn dns_rejects_ambiguous_missing_and_public_token_files() {
             "expected {expected:?} in {error:?}"
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn public_dns_token_file_is_reported_without_failing_load() {
+    let dir = tempdir().unwrap();
+    let paths = ConfigPaths::from_root(dir.path());
+    let token = dir.path().join("public-token");
+    fs::write(&token, "secret-token\n").unwrap();
+    fs::set_permissions(&token, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::write(
+        &paths.config,
+        format!(
+            "version: 1\ndns:\n  provider: cloudflare\n  token_file: {}\n  dynamic: [app.example.com]\nservices: {{}}\n",
+            token.display()
+        ),
+    )
+    .unwrap();
+    let config = HostConfig::load(&paths).unwrap();
+    let problems = config.problems();
+    assert_eq!(problems.len(), 1);
+    assert!(problems[0].contains("must not be readable or writable by group/others"));
 }
 
 #[cfg(unix)]
@@ -264,8 +301,11 @@ fn native_env_files_must_be_private() {
         ),
     )
     .unwrap();
+    let config = HostConfig::load(&paths).unwrap();
+    assert!(!config.services.contains_key("worker"));
     assert!(
-        format!("{:#}", HostConfig::load(&paths).unwrap_err())
+        config.invalid_services["worker"]
+            .reason
             .contains("must not be readable or writable by group/others")
     );
 }

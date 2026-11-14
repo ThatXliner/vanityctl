@@ -255,18 +255,30 @@ async fn main() -> Result<()> {
     }
     if matches!(cli.command, Command::Config { .. }) {
         let config = HostConfig::load(&ConfigPaths::discover()?)?;
+        let problems = config.problems();
         if cli.json {
             print_json(
-                &json!({"valid":true,"services":config.services.len(),"plugins":config.resolved_plugins.len(),"version":config.version}),
+                &json!({"valid":problems.is_empty(),"problems":problems,"services":config.services.len(),"invalidServices":config.invalid_services.len(),"plugins":config.resolved_plugins.len(),"version":config.version}),
             )?;
-            return Ok(());
+        } else if problems.is_empty() {
+            println!(
+                "configuration valid: {} services, {} plugins (schema v{})",
+                config.services.len(),
+                config.resolved_plugins.len(),
+                config.version
+            );
+        } else {
+            eprintln!(
+                "configuration has {} environment problem(s); other services still work:",
+                problems.len()
+            );
+            for problem in &problems {
+                eprintln!("- {problem}");
+            }
         }
-        println!(
-            "configuration valid: {} services, {} plugins (schema v{})",
-            config.services.len(),
-            config.resolved_plugins.len(),
-            config.version
-        );
+        if !problems.is_empty() {
+            std::process::exit(1);
+        }
         return Ok(());
     }
     let api = Api::discover(cli.api)?;
@@ -324,12 +336,16 @@ async fn main() -> Result<()> {
             } else {
                 println!("NAME\tTYPE\tENABLED\tDESCRIPTION");
                 for row in v.as_array().unwrap() {
+                    let description = match row.get("error").and_then(Value::as_str) {
+                        Some(error) => format!("INVALID: {error}"),
+                        None => s(row, "description").to_owned(),
+                    };
                     println!(
                         "{}\t{}\t{}\t{}",
                         s(row, "name"),
                         s(row, "type"),
                         s(row, "enabled"),
-                        s(row, "description")
+                        description
                     );
                 }
             }

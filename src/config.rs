@@ -132,10 +132,27 @@ pub struct HostConfig {
     pub plugins: BTreeMap<String, PluginDefinition>,
     #[serde(skip)]
     pub resolved_plugins: BTreeMap<String, PluginResolution>,
+    /// Services set aside at load time because something they need on this
+    /// machine is missing. See [`InvalidService`].
+    #[serde(skip)]
+    pub invalid_services: BTreeMap<String, InvalidService>,
+    /// Why the configured DNS credentials cannot be read, if they cannot.
+    #[serde(skip)]
+    pub dns_problem: Option<String>,
 }
 
 fn default_version() -> u32 {
     1
+}
+
+/// A service whose entry parsed and validated, but which points at something
+/// on the machine that is missing or unusable right now (for example, a
+/// deleted Compose directory). Loading keeps it out of `services` so every
+/// other service stays controllable, and remembers why so commands can show it.
+#[derive(Debug, Clone)]
+pub struct InvalidService {
+    pub service: Service,
+    pub reason: String,
 }
 
 impl HostConfig {
@@ -168,10 +185,76 @@ impl HostConfig {
         }
         resolve_plugins(&mut config, paths)?;
         config.validate()?;
+        config.set_aside_unavailable_services();
         Ok(config)
     }
 
+    /// Environment problems found while loading: services set aside as
+    /// invalid, and DNS credentials that cannot be read. Configuration errors
+    /// never get here because they fail `load` outright.
+    pub fn problems(&self) -> Vec<String> {
+        self.invalid_services
+            .values()
+            .map(|invalid| invalid.reason.clone())
+            .chain(self.dns_problem.clone())
+            .collect()
+    }
+
+    pub fn contains_service(&self, name: &str) -> bool {
+        self.services.contains_key(name) || self.invalid_services.contains_key(name)
+    }
+
+    /// Checks everything that can be decided from the configuration text alone,
+    /// and reports every such problem at once.
     pub fn validate(&self) -> Result<()> {
+        let mut problems = Vec::new();
+        if let Err(error) = self.validate_globals() {
+            problems.push(error);
+        }
+        for (name, service) in &self.services {
+            if let Err(error) = validate_service_config(name, service) {
+                problems.push(error);
+            }
+        }
+        match problems.len() {
+            0 => Ok(()),
+            1 => Err(problems.remove(0)),
+            count => bail!(
+                "configuration has {count} problems:\n{}",
+                problems
+                    .iter()
+                    .map(|error| format!("- {error:#}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+        }
+    }
+
+    fn set_aside_unavailable_services(&mut self) {
+        let unavailable: Vec<_> = self
+            .services
+            .iter()
+            .filter_map(|(name, service)| {
+                check_service_environment(name, service)
+                    .err()
+                    .map(|error| (name.clone(), format!("{error:#}")))
+            })
+            .collect();
+        for (name, reason) in unavailable {
+            let service = self.services.remove(&name).expect("service listed above");
+            self.invalid_services
+                .insert(name, InvalidService { service, reason });
+        }
+        self.dns_problem = self.dns.as_ref().and_then(|dns| {
+            dns.credentials
+                .as_ref()
+                .or(dns.token_file.as_ref())
+                .and_then(|path| read_private_file(path, "DNS credentials").err())
+                .map(|error| format!("{error:#}"))
+        });
+    }
+
+    fn validate_globals(&self) -> Result<()> {
         if self.version != 1 {
             bail!("unsupported config version {}; expected 1", self.version);
         }
@@ -188,100 +271,6 @@ impl HostConfig {
             bail!(
                 "api.public_read_only requires api.token_env or api.token_file so mutating routes remain protected"
             );
-        }
-        for (name, svc) in &self.services {
-            if name.is_empty()
-                || !name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-            {
-                bail!("service name {name:?} may only contain letters, numbers, '-' and '_'");
-            }
-            match svc.kind {
-                ServiceType::Docker if svc.image.is_none() && svc.build.is_none() => {
-                    bail!("service {name}: docker requires image or build")
-                }
-                ServiceType::Compose => validate_compose(name, svc)?,
-                ServiceType::Process | ServiceType::Job if svc.command.is_none() => {
-                    bail!("service {name}: {:?} requires command", svc.kind)
-                }
-                ServiceType::Plugin => {
-                    bail!("service {name}: unresolved plugin declaration; check its plugin source")
-                }
-                _ => {}
-            }
-            if svc.kind == ServiceType::Job && svc.schedule.is_none() {
-                bail!("service {name}: job requires schedule");
-            }
-            if let Some(schedule) = &svc.schedule {
-                validate_schedule(schedule)
-                    .with_context(|| format!("service {name}: invalid job schedule"))?;
-            }
-            if svc.kind != ServiceType::Job && svc.schedule.is_some() {
-                bail!("service {name}: schedule is only valid for jobs");
-            }
-            if svc.kind == ServiceType::Job
-                && !matches!(svc.restart, crate::model::RestartPolicy::No)
-            {
-                bail!("service {name}: scheduled jobs cannot set restart");
-            }
-            if svc.throttle_interval == Some(0) {
-                bail!("service {name}: throttle_interval must be greater than zero");
-            }
-            let has_launchd_options = svc.run_at_load.is_some()
-                || svc.throttle_interval.is_some()
-                || svc.process_type.is_some()
-                || svc.low_priority_io.is_some()
-                || svc.resource_limits.is_some();
-            if !matches!(svc.kind, ServiceType::Process | ServiceType::Job) && has_launchd_options {
-                bail!(
-                    "service {name}: run_at_load, throttle_interval, process_type, low_priority_io, and resource_limits are only valid for process and job services"
-                );
-            }
-            if matches!(svc.kind, ServiceType::Process | ServiceType::Job)
-                && let Some(path) = &svc.env_file
-            {
-                read_private_file(path, &format!("service {name} env_file"))?;
-            }
-            if svc.kind != ServiceType::Compose && (svc.file.is_some() || svc.files.is_some()) {
-                bail!("service {name}: file and files are only valid for compose services");
-            }
-            if svc.plugin.is_some() || !svc.config.is_empty() || !svc.secrets.is_empty() {
-                bail!(
-                    "service {name}: plugin, config, and secrets are only valid on type: plugin declarations"
-                );
-            }
-            if let Some(source) = &svc.source
-                && source.kind != "git"
-            {
-                bail!("service {name}: source.type must be git");
-            }
-            if let Some(deploy) = &svc.deploy {
-                if deploy.auto && svc.source.is_none() {
-                    bail!("service {name}: deploy.auto requires source");
-                }
-                if deploy.auto
-                    && matches!(
-                        deploy.trigger,
-                        Some(DeployTrigger::Webhook | DeployTrigger::Github)
-                    )
-                {
-                    bail!(
-                        "service {name}: webhook triggers are reserved for a future release; use poll"
-                    );
-                }
-                if let Some(DeployTrigger::Poll { interval }) = &deploy.trigger {
-                    parse_duration(interval)
-                        .with_context(|| format!("service {name}: invalid deploy poll interval"))?;
-                }
-            }
-            for value in svc.environment.values() {
-                if value.contains("${") {
-                    bail!(
-                        "service {name}: environment interpolation is not supported; use env_file for secrets"
-                    );
-                }
-            }
         }
         if let Some(dns) = &self.dns {
             if dns.provider != "cloudflare" {
@@ -304,9 +293,6 @@ impl HostConfig {
                     "dns requires exactly one credential source: credentials, token_env, or token_file"
                 );
             }
-            if let Some(path) = dns.credentials.as_ref().or(dns.token_file.as_ref()) {
-                read_private_file(path, "DNS credentials")?;
-            }
             if dns.dynamic.is_empty() && dns.records.is_empty() {
                 bail!("dns requires at least one dynamic hostname or record");
             }
@@ -324,7 +310,118 @@ impl HostConfig {
     }
 }
 
-fn validate_compose(name: &str, service: &Service) -> Result<()> {
+/// Fully checks one service: its configuration and the files and directories
+/// it needs on this machine.
+pub fn validate_service(name: &str, service: &Service) -> Result<()> {
+    validate_service_config(name, service)?;
+    check_service_environment(name, service)
+}
+
+/// Checks that need only the configuration text. Failures here make the whole
+/// configuration fail to load, because the entry is wrong or ambiguous and no
+/// change on the machine can fix it.
+fn validate_service_config(name: &str, svc: &Service) -> Result<()> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!("service name {name:?} may only contain letters, numbers, '-' and '_'");
+    }
+    match svc.kind {
+        ServiceType::Docker if svc.image.is_none() && svc.build.is_none() => {
+            bail!("service {name}: docker requires image or build")
+        }
+        ServiceType::Compose => validate_compose_config(name, svc)?,
+        ServiceType::Process | ServiceType::Job if svc.command.is_none() => {
+            bail!("service {name}: {:?} requires command", svc.kind)
+        }
+        ServiceType::Plugin => {
+            bail!("service {name}: unresolved plugin declaration; check its plugin source")
+        }
+        _ => {}
+    }
+    if svc.kind == ServiceType::Job && svc.schedule.is_none() {
+        bail!("service {name}: job requires schedule");
+    }
+    if let Some(schedule) = &svc.schedule {
+        validate_schedule(schedule)
+            .with_context(|| format!("service {name}: invalid job schedule"))?;
+    }
+    if svc.kind != ServiceType::Job && svc.schedule.is_some() {
+        bail!("service {name}: schedule is only valid for jobs");
+    }
+    if svc.kind == ServiceType::Job && !matches!(svc.restart, crate::model::RestartPolicy::No) {
+        bail!("service {name}: scheduled jobs cannot set restart");
+    }
+    if svc.throttle_interval == Some(0) {
+        bail!("service {name}: throttle_interval must be greater than zero");
+    }
+    let has_launchd_options = svc.run_at_load.is_some()
+        || svc.throttle_interval.is_some()
+        || svc.process_type.is_some()
+        || svc.low_priority_io.is_some()
+        || svc.resource_limits.is_some();
+    if !matches!(svc.kind, ServiceType::Process | ServiceType::Job) && has_launchd_options {
+        bail!(
+            "service {name}: run_at_load, throttle_interval, process_type, low_priority_io, and resource_limits are only valid for process and job services"
+        );
+    }
+    if svc.kind != ServiceType::Compose && (svc.file.is_some() || svc.files.is_some()) {
+        bail!("service {name}: file and files are only valid for compose services");
+    }
+    if svc.plugin.is_some() || !svc.config.is_empty() || !svc.secrets.is_empty() {
+        bail!(
+            "service {name}: plugin, config, and secrets are only valid on type: plugin declarations"
+        );
+    }
+    if let Some(source) = &svc.source
+        && source.kind != "git"
+    {
+        bail!("service {name}: source.type must be git");
+    }
+    if let Some(deploy) = &svc.deploy {
+        if deploy.auto && svc.source.is_none() {
+            bail!("service {name}: deploy.auto requires source");
+        }
+        if deploy.auto
+            && matches!(
+                deploy.trigger,
+                Some(DeployTrigger::Webhook | DeployTrigger::Github)
+            )
+        {
+            bail!("service {name}: webhook triggers are reserved for a future release; use poll");
+        }
+        if let Some(DeployTrigger::Poll { interval }) = &deploy.trigger {
+            parse_duration(interval)
+                .with_context(|| format!("service {name}: invalid deploy poll interval"))?;
+        }
+    }
+    for value in svc.environment.values() {
+        if value.contains("${") {
+            bail!(
+                "service {name}: environment interpolation is not supported; use env_file for secrets"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Checks the files and directories a valid entry points at. These can be
+/// missing now and appear later, so a failure sets only this service aside.
+fn check_service_environment(name: &str, svc: &Service) -> Result<()> {
+    if matches!(svc.kind, ServiceType::Process | ServiceType::Job)
+        && let Some(path) = &svc.env_file
+    {
+        read_private_file(path, &format!("service {name} env_file"))?;
+    }
+    if svc.kind == ServiceType::Compose {
+        check_compose_environment(name, svc)?;
+    }
+    Ok(())
+}
+
+fn validate_compose_config(name: &str, service: &Service) -> Result<()> {
     let directory = service
         .directory
         .as_deref()
@@ -347,8 +444,27 @@ fn validate_compose(name: &str, service: &Service) -> Result<()> {
         }
         _ => {}
     }
-
     let directory = expand_path(directory)?;
+    let mut files = HashSet::new();
+    for file in service.compose_files() {
+        let path = resolve_compose_file(&directory, file)?;
+        if !files.insert(path.clone()) {
+            bail!(
+                "service {name}: compose file {} is listed more than once",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn check_compose_environment(name: &str, service: &Service) -> Result<()> {
+    let directory = expand_path(
+        service
+            .directory
+            .as_deref()
+            .expect("compose directory was validated"),
+    )?;
     if !directory.exists() {
         if service.source.is_none()
             && !service
@@ -374,15 +490,8 @@ fn validate_compose(name: &str, service: &Service) -> Result<()> {
         // validates every file before invoking Docker.
         return Ok(());
     }
-    let mut files = HashSet::new();
     for file in service.compose_files() {
         let path = resolve_compose_file(&directory, file)?;
-        if !files.insert(path.clone()) {
-            bail!(
-                "service {name}: compose file {} is listed more than once",
-                path.display()
-            );
-        }
         fs::File::open(&path).with_context(|| {
             format!(
                 "service {name}: compose file {} is not readable",
