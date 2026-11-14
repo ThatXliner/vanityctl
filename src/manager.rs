@@ -14,7 +14,7 @@ use sysinfo::System;
 
 use crate::{
     backend::BackendSet,
-    config::{ConfigPaths, HostConfig, expand_path},
+    config::{ConfigPaths, HostConfig, InvalidService, expand_path},
     deploy::DeployCoordinator,
     dns::{DnsReconciler, DnsStatus},
     model::{DeploymentRecord, Event, JobRun, RuntimeState, Service, ServiceStatus, ServiceType},
@@ -45,6 +45,8 @@ pub struct ApplyResult {
 #[serde(rename_all = "camelCase")]
 pub struct ApplyPlan {
     pub services: Vec<String>,
+    /// Services that apply will skip, with the reason each is invalid.
+    pub invalid: BTreeMap<String, String>,
     pub plugins: Vec<PluginResolution>,
     pub actions: Vec<String>,
     pub note: &'static str,
@@ -98,11 +100,17 @@ impl Manager {
         HostConfig::load(&self.paths)
     }
     fn service(&self, name: &str) -> Result<Service> {
-        self.config()?
-            .services
-            .get(name)
-            .cloned()
-            .with_context(|| format!("unknown service {name:?}; run `vanityctl list`"))
+        let mut config = self.config()?;
+        if let Some(service) = config.services.remove(name) {
+            return Ok(service);
+        }
+        if let Some(invalid) = config.invalid_services.get(name) {
+            bail!(
+                "{}; fix or remove this service's registry entry, then retry",
+                invalid.reason
+            );
+        }
+        bail!("unknown service {name:?}; run `vanityctl list`")
     }
 
     pub async fn statuses(&self) -> Result<Vec<ServiceStatus>> {
@@ -112,6 +120,13 @@ impl Manager {
         for (name, service) in &config.services {
             statuses.push(self.status_for(name, service, &snapshot).await);
         }
+        statuses.extend(
+            config
+                .invalid_services
+                .iter()
+                .map(|(name, invalid)| invalid_status(name, invalid)),
+        );
+        statuses.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(statuses)
     }
 
@@ -157,10 +172,15 @@ impl Manager {
         status
     }
     pub async fn status(&self, name: &str) -> Result<ServiceStatus> {
-        let service = self.service(name)?;
-        Ok(self
-            .status_for(name, &service, &self.state.snapshot())
-            .await)
+        let config = self.config()?;
+        if let Some(invalid) = config.invalid_services.get(name) {
+            return Ok(invalid_status(name, invalid));
+        }
+        let service = config
+            .services
+            .get(name)
+            .with_context(|| format!("unknown service {name:?}; run `vanityctl list`"))?;
+        Ok(self.status_for(name, service, &self.state.snapshot()).await)
     }
 
     pub async fn apply(&self) -> Result<ApplyResult> {
@@ -170,6 +190,9 @@ impl Manager {
             unchanged: vec![],
             errors: BTreeMap::new(),
         };
+        for (name, invalid) in &config.invalid_services {
+            result.errors.insert(name.clone(), invalid.reason.clone());
+        }
         let mut unavailable_plugins = BTreeSet::new();
         for (instance, plugin) in &config.resolved_plugins {
             let Some(application) = &plugin.application else {
@@ -232,6 +255,11 @@ impl Manager {
         let config = self.config()?;
         Ok(ApplyPlan {
             services: config.services.keys().cloned().collect(),
+            invalid: config
+                .invalid_services
+                .iter()
+                .map(|(name, invalid)| (name.clone(), invalid.reason.clone()))
+                .collect(),
             plugins: config.resolved_plugins.values().cloned().collect(),
             actions: config
                 .resolved_plugins
@@ -595,7 +623,16 @@ impl Manager {
         Ok(value)
     }
     pub fn list(&self) -> Result<Vec<Value>> {
-        Ok(self.config()?.services.iter().map(|(name, service)| json!({"name":name,"type":service.kind,"enabled":service.enabled,"description":service.description})).collect())
+        let config = self.config()?;
+        let valid = config.services.iter().map(|(name, service)| {
+            json!({"name":name,"type":service.kind,"enabled":service.enabled,"description":service.description,"valid":true})
+        });
+        let invalid = config.invalid_services.iter().map(|(name, invalid)| {
+            json!({"name":name,"type":invalid.service.kind,"enabled":invalid.service.enabled,"description":invalid.service.description,"valid":false,"error":invalid.reason})
+        });
+        let mut rows: Vec<Value> = valid.chain(invalid).collect();
+        rows.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        Ok(rows)
     }
 
     pub fn discover(&self, query: Option<&str>) -> Result<crate::discovery::DiscoveryReport> {
@@ -617,7 +654,7 @@ impl Manager {
     pub fn agent_context_data(&self, name: Option<&str>) -> Result<Value> {
         let config = self.config()?;
         if let Some(name) = name
-            && !config.services.contains_key(name)
+            && !config.contains_service(name)
         {
             bail!(
                 "unknown service {name:?}; run `vanityctl discover` to find unregistered resources"
@@ -629,8 +666,14 @@ impl Manager {
                 "gitDeployment":s.source.is_some(),"environmentKeys":s.environment.keys().collect::<Vec<_>>(),
                 "commands":{"status":["vanityctl","status",name,"--json"],"up":["vanityctl","up",name],
                     "logs":["vanityctl","logs",name],"restart":["vanityctl","restart",name]}})).collect();
+        let invalid: Vec<_> = config
+            .invalid_services
+            .iter()
+            .filter(|(n, _)| name.is_none_or(|name| name == n.as_str()))
+            .map(|(name, invalid)| json!({"name":name,"type":invalid.service.kind,"description":invalid.service.description,"error":invalid.reason}))
+            .collect();
         Ok(
-            json!({"schemaVersion":1,"services":services,"config":self.paths.config,
+            json!({"schemaVersion":1,"services":services,"invalidServices":invalid,"config":self.paths.config,
             "guidance":"Use up SERVICE for initial creation and config/env changes; start only resumes existing resources. Global apply reconciles every configured service. Use discover for unregistered resources; discovery never adopts them."}),
         )
     }
@@ -756,18 +799,25 @@ impl Manager {
         checks.push(check_command(&self.runner, "docker", &["info"]));
         #[cfg(target_os = "macos")]
         checks.push(check_command(&self.runner, "launchctl", &["version"]));
-        checks.push(match self.config() {
-            Ok(_) => DoctorCheck {
-                name: "configuration".into(),
-                ok: true,
-                detail: format!("{} is valid", self.paths.config.display()),
-            },
-            Err(e) => DoctorCheck {
+        match self.config() {
+            Ok(config) => {
+                let problems = config.problems();
+                checks.push(DoctorCheck {
+                    name: "configuration".into(),
+                    ok: problems.is_empty(),
+                    detail: if problems.is_empty() {
+                        format!("{} is valid", self.paths.config.display())
+                    } else {
+                        problems.join("; ")
+                    },
+                });
+            }
+            Err(e) => checks.push(DoctorCheck {
                 name: "configuration".into(),
                 ok: false,
                 detail: format!("{e:#}"),
-            },
-        });
+            }),
+        }
         let healthy = checks.iter().all(|c| c.ok);
         DoctorReport {
             healthy,
@@ -825,6 +875,12 @@ impl Manager {
                 "- `{name}` ({:?}): {}\n",
                 svc.kind,
                 svc.description.unwrap_or_else(|| "no description".into())
+            ));
+        }
+        for (name, invalid) in &config.invalid_services {
+            out.push_str(&format!(
+                "- `{name}` ({:?}): INVALID, cannot be operated until fixed: {}\n",
+                invalid.service.kind, invalid.reason
             ));
         }
         out.push_str("\nStart with `vanityctl agent-context <service> --json` for focused metadata and operation commands. Use `vanityctl discover <query> --json` for unregistered resources; discovery never adopts them. Use `vanityctl up <service>` for initial creation and configuration/environment changes. `start` only resumes existing resources; global `apply` reconciles every service.\n");
@@ -906,6 +962,23 @@ impl Manager {
             }
         });
         Ok(())
+    }
+}
+
+fn invalid_status(name: &str, invalid: &InvalidService) -> ServiceStatus {
+    ServiceStatus {
+        name: name.to_owned(),
+        kind: invalid.service.kind.clone(),
+        state: RuntimeState::Invalid,
+        health: Some("invalid".into()),
+        uptime_seconds: None,
+        cpu_percent: None,
+        memory_bytes: None,
+        pid: None,
+        ports: invalid.service.ports.clone(),
+        details: Some(invalid.reason.clone()),
+        deployment: None,
+        latest_job: None,
     }
 }
 

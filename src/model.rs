@@ -312,6 +312,8 @@ pub enum RuntimeState {
     Disabled,
     Unknown,
     Failed,
+    /// The registry entry points at something missing on this machine.
+    Invalid,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
